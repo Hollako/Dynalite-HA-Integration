@@ -1,0 +1,139 @@
+scan:
+  name: Scan Bus
+  description: >
+    Poll a range of areas and channels to discover devices on the Dynalite bus.
+    Devices that respond are automatically added as entities.
+  fields:
+    area_min:
+      name: First Area
+      description: First area number to poll (1-based).
+      required: false
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: box
+    area_max:
+      name: Last Area
+      description: Last area number to poll (1-based, inclusive).
+      required: false
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: box
+    channel_count:
+      name: Channels per Area
+      description: Number of channels to probe in each area (0 to N-1).
+      required: false
+      default: 8
+      selector:
+        number:
+          min: 1
+          max: 64
+          step: 1
+          mode: box
+    delay_ms:
+      name: Inter-frame Delay (ms)
+      description: Delay between frames to avoid flooding the bus.
+      required: false
+      default: 50
+      selector:
+        number:
+          min: 10
+          max: 500
+          step: 10
+          mode: box
+
+select_preset:
+  name: Select Preset
+  description: Activate a preset on a Dynalite area.
+  fields:
+    area:
+      name: Area
+      description: Area number (1-255).
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: box
+    preset:
+      name: Preset
+      description: Preset number to activate (1-based).
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: box
+
+set_level:
+  name: Set Channel Level
+  description: Set a channel to a specific brightness level.
+  fields:
+    area:
+      name: Area
+      description: Area number (1-255).
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: box
+    channel:
+      name: Channel
+      description: Channel number (0-based).
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 63
+          step: 1
+          mode: box
+    level:
+      name: Level (%)
+      description: Brightness percentage (0 = off, 100 = full).
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: slider
+
+send_raw_frame:
+  name: Send Raw DyNet Frame
+  description: >
+    Send a raw DyNet frame to the bus for debugging. Supply the 8 bytes as
+    space-separated hex (e.g. "5C FF FF 40 00 00 0A 00"). The last byte is
+    the checksum placeholder — it will be recalculated unless you disable
+    compute_checksum.
+  fields:
+    frame:
+      name: Frame (hex)
+      description: >
+        8 bytes in hex, space-separated. Example: "1C 03 00 00 00 00 FF 00"
+        or "5C FF FF 40 00 00 0A 00". The checksum byte is recalculated
+        automatically (set compute_checksum: false to send as-is).
+      required: true
+      example: "5C FF FF 40 00 00 0A 00"
+      selector:
+        text:
+    compute_checksum:
+      name: Compute Checksum
+      description: >
+        If true (default), the last byte is replaced with the correct
+        two's-complement checksum. Set to false to send the frame exactly
+        as provided.
+      required: false
+      default: true
+      selector:
+        boolean:

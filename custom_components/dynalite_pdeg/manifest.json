@@ -1,0 +1,11 @@
+{
+  "domain": "dynalite_pdeg",
+  "name": "Philips Dynalite (PDEG)",
+  "version": "0.1.1",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "",
+  "iot_class": "local_push",
+  "requirements": []
+}

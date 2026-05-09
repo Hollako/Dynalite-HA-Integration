@@ -1,0 +1,68 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Dynalite PDEG",
+        "description": "Enter the IP address and port of your Philips Dynalite Ethernet Gateway (PDEG).",
+        "data": {
+          "host": "Host / IP Address",
+          "port": "TCP Port",
+          "name": "Integration Name"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the PDEG. Check the IP address and port.",
+      "timeout": "Connection timed out. Ensure the PDEG is reachable on the network.",
+      "unknown": "Unexpected error. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "This PDEG is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Scan Settings",
+        "description": "Configure the area and channel range used for bus discovery.",
+        "data": {
+          "area_min":      "First Area (min)",
+          "area_max":      "Last Area (max)",
+          "channel_count": "Channels per Area",
+          "delay_ms":      "Inter-frame Delay (ms)",
+          "run_scan":      "Run scan immediately after saving"
+        }
+      },
+      "areas": {
+        "title": "Manage Areas",
+        "description": "Add areas by number (comma-separated). Check areas below to remove them.",
+        "data": {
+          "add_areas":    "Add Areas (e.g. 21, 22, 30)",
+          "remove_areas": "Remove Areas"
+        }
+      },
+      "channels_area": {
+        "title": "Manage Channels",
+        "description": "Select an area to add or configure its channels, or choose Done to finish.",
+        "data": {
+          "area": "Area"
+        }
+      },
+      "channels_edit": {
+        "title": "Edit Channels — {area_name}",
+        "description": "Add channels by number (e.g. 0, 1, 2). Select existing channels to change their type or remove them. A reload is required after changing types.",
+        "data": {
+          "add_channels":         "Add Channels (0-based, e.g. 0, 1, 2)",
+          "add_type":             "Type for New Channels",
+          "change_type_channels": "Change Type: Select Channels",
+          "change_type":          "New Type for Selected Channels",
+          "remove_channels":      "Remove Channels"
+        }
+      }
+    },
+    "error": {
+      "invalid_area":    "Invalid area number — must be between 1 and 255.",
+      "invalid_channel": "Invalid channel number — must be between 0 and 63."
+    }
+  }
+}
