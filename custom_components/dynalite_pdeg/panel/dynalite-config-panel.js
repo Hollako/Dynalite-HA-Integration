@@ -744,7 +744,7 @@ class DynaliteConfigPanel extends HTMLElement {
       <td><input type="text" class="dp-name" value="${this._esc(ar.name)}"
                  placeholder="Area ${ar.area}" style="width:100%;"></td>
       <td><input type="number" class="dp-fade" value="${(ar.fade_tenths / 10).toFixed(1)}"
-                 min="0" max="600" step="0.1" style="width:65px;"></td>
+                 min="0.1" max="600" step="0.1" style="width:65px;"></td>
       <td><input type="number" class="dp-presets" value="${ar.preset_count}"
                  min="1" max="255" style="width:52px;"></td>
       <td><select class="dp-area-type">${areaTypeOpts}</select></td>
@@ -953,7 +953,7 @@ class DynaliteConfigPanel extends HTMLElement {
 
   async _saveArea(areaNum, tr) {
     const name     = tr.querySelector(".dp-name").value.trim();
-    const fadeSecs = parseFloat(tr.querySelector(".dp-fade").value) || 2;
+    const fadeSecs = Math.max(0.1, parseFloat(tr.querySelector(".dp-fade").value) || 2);
     const presets  = parseInt(tr.querySelector(".dp-presets").value) || 4;
     const areaType = tr.querySelector(".dp-area-type").value;
 

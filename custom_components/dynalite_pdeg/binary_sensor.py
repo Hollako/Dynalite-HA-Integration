@@ -62,8 +62,13 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
+    def _remove_device_sensor(device_code: int, box_number: int) -> None:
+        """Allow the device to be re-added later if rediscovered."""
+        known_devices.discard((device_code, box_number))
+
     _add_device_sensors()
     coordinator.on_new_device_cbs.append(_add_device_sensors)
+    coordinator.on_remove_device_cbs.append(_remove_device_sensor)
 
 
 # ── PIR motion sensor ─────────────────────────────────────────────────────────

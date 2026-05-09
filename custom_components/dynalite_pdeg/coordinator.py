@@ -151,9 +151,10 @@ class DynaliteCoordinator:
         self.on_new_sensor_cbs:  list[callable] = []   # type: ignore[type-arg]
         self.on_remove_sensor_cbs: list[callable] = []  # type: ignore[type-arg]  called with area:int when temp sensor disabled
         self.on_new_climate_cbs:  list[callable] = []   # type: ignore[type-arg]
-        self.on_new_device_cbs:   list[callable] = []   # type: ignore[type-arg]
-        self.on_new_lux_cbs:      list[callable] = []   # type: ignore[type-arg]
-        self.on_remove_lux_cbs:   list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when lux disabled
+        self.on_new_device_cbs:    list[callable] = []   # type: ignore[type-arg]
+        self.on_remove_device_cbs: list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when device deleted
+        self.on_new_lux_cbs:       list[callable] = []   # type: ignore[type-arg]
+        self.on_remove_lux_cbs:    list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when lux disabled
         # Storage — injected by __init__.py after construction
         self._storage = None
         self._save_task: asyncio.Task | None = None

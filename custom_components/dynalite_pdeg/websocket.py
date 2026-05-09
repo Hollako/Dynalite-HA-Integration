@@ -605,13 +605,17 @@ async def ws_set_pir(
             cb()
         LOGGER.info("[WS] PIR enabled for area %d", area_num)
     else:
-        # Remove the motion sensor entity from HA
-        ent_reg   = er.async_get(hass)
-        uid       = f"{coord.host}_a{area_num}_motion"
-        entity_id = ent_reg.async_get_entity_id("binary_sensor", DOMAIN, uid)
-        if entity_id:
-            ent_reg.async_remove(entity_id)
-            LOGGER.info("[WS] removed motion entity %s", entity_id)
+        # Remove the motion sensor entity and its occupancy switch from HA
+        ent_reg = er.async_get(hass)
+        for platform, uid_suffix in (
+            ("binary_sensor", f"a{area_num}_motion"),
+            ("switch",        f"a{area_num}_occ_switch"),
+        ):
+            uid       = f"{coord.host}_{uid_suffix}"
+            entity_id = ent_reg.async_get_entity_id(platform, DOMAIN, uid)
+            if entity_id:
+                ent_reg.async_remove(entity_id)
+                LOGGER.info("[WS] removed entity %s", entity_id)
         # Update known_pir closure so PIR can be re-enabled without a restart
         for cb in coord.on_remove_pir_cbs:
             cb(area_num)
@@ -837,31 +841,43 @@ async def ws_delete_device(
     connection: websocket_api.ActiveConnection,
     msg: dict,
 ) -> None:
-    """Remove a physical device entry and its binary sensor entity."""
-    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    """Remove a physical device entry and ALL its HA entities/device from HA."""
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
 
     coord = _get_coordinator(hass, msg["entry_id"])
     if not coord:
         connection.send_error(msg["id"], "not_found", "Integration not found")
         return
 
-    key = (msg["device_code"], msg["box_number"])
+    device_code = msg["device_code"]
+    box_number  = msg["box_number"]
+    key         = (device_code, box_number)
 
-    # Remove from coordinator state (may already be absent — that's fine)
+    # ── Fire removal callbacks BEFORE popping, so callbacks can read the dev ──
+    dev = coord.devices.get(key)
+    if dev and dev.has_lux:
+        for cb in coord.on_remove_lux_cbs:
+            cb(device_code, box_number)
+    for cb in coord.on_remove_device_cbs:
+        cb(device_code, box_number)
+
+    # ── Remove from coordinator state ─────────────────────────────────────────
     coord.devices.pop(key, None)
     coord.device_online.pop(key, None)
     coord._device_last_seen.pop(key, None)  # noqa: SLF001
     coord.schedule_save()
 
-    # Remove the binary_sensor entity from HA entity registry
-    ent_reg   = er.async_get(hass)
-    uid       = f"{coord.host}_device_{msg['device_code']}_{msg['box_number']}"
-    entity_id = ent_reg.async_get_entity_id("binary_sensor", DOMAIN, uid)
-    if entity_id:
-        ent_reg.async_remove(entity_id)
-        LOGGER.info("[WS] removed entity %s", entity_id)
+    # ── Remove the HA device (cascades: HA deletes all attached entities) ─────
+    dev_reg    = dr.async_get(hass)
+    identifier = (DOMAIN, f"{coord.host}_{device_code}_{box_number}")
+    ha_device  = dev_reg.async_get_device(identifiers={identifier})
+    if ha_device:
+        dev_reg.async_remove_device(ha_device.id)
+        LOGGER.info(
+            "[WS] removed HA device %s (cascaded entity removal)", ha_device.id
+        )
 
-    LOGGER.info("[WS] deleted device 0x%02X box %d", msg["device_code"], msg["box_number"])
+    LOGGER.info("[WS] deleted device 0x%02X box %d", device_code, box_number)
     connection.send_result(msg["id"], {"ok": True})
 
 

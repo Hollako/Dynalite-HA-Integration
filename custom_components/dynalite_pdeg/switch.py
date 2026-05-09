@@ -33,8 +33,13 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
+    def _remove_occ_switch(area: int) -> None:
+        """Allow the occupancy switch to be re-added if PIR is re-enabled."""
+        known_pir.discard(area)
+
     _add_occ_switches()
     coordinator.on_new_pir_cbs.append(_add_occ_switches)
+    coordinator.on_remove_pir_cbs.append(_remove_occ_switch)
 
     # ── Channel switches (channel_type == "switch") ───────────────────────────
     known_ch: set[tuple[int, int]] = set()
