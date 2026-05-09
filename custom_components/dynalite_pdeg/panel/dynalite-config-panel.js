@@ -196,7 +196,7 @@ class DynaliteConfigPanel extends HTMLElement {
         .dp-ch-row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
         .dp-ch-num { width: 82px; flex-shrink: 0; white-space: nowrap;
                      color: var(--secondary-text-color, #9e9e9e); font-size: 11px; font-weight: 600; }
-        .dp-ch-inp { width: 150px; flex-shrink: 0; font-size: 12px !important; }
+        .dp-ch-inp { width: 220px; flex-shrink: 0; font-size: 12px !important; }
         .dp-ch-sel { width: 118px; flex-shrink: 0; font-size: 12px !important; }
         .dp-ch-badge { display: inline-block; padding: 1px 0; border-radius: 10px;
                        width: 90px; text-align: center; font-size: 11px; font-weight: 600; flex-shrink: 0; }
@@ -210,12 +210,33 @@ class DynaliteConfigPanel extends HTMLElement {
         .dp-add-form label { font-size: 11px; color: var(--secondary-text-color, #9e9e9e); }
         .dp-down-wrap { display: none; align-items: center; gap: 4px; }
         .dp-footer { margin-top: 20px; display: flex; justify-content: flex-end; }
-        .dp-msg { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; display: none; }
-        .dp-msg-ok  { background:#e8f5e9; color:#2e7d32; }
-        .dp-msg-err { background:#ffebee; color:#b71c1c; }
-        .dp-actions { display: flex; gap: 6px; align-items: center; padding-top: 4px; }
-        .dp-empty { padding: 32px; text-align: center;
+.dp-empty { padding: 32px; text-align: center;
                     color: var(--secondary-text-color, #9e9e9e); font-size: 14px; }
+
+        /* ── Floating toast ── */
+        #dp-toast {
+          position: fixed;
+          top: 20px;
+          right: 24px;
+          z-index: 99999;
+          max-width: 420px;
+          min-width: 220px;
+          padding: 11px 16px;
+          border-radius: 8px;
+          font-size: 13px;
+          font-weight: 500;
+          box-shadow: 0 4px 16px rgba(0,0,0,.22);
+          pointer-events: none;
+          opacity: 0;
+          transform: translateY(-12px);
+          transition: opacity .22s ease, transform .22s ease;
+        }
+        #dp-toast.dp-toast-show {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        #dp-toast.dp-msg-ok  { background: #e8f5e9; color: #2e7d32; }
+        #dp-toast.dp-msg-err { background: #ffebee; color: #b71c1c; }
       </style>
 
       <div id="dp-root">
@@ -235,8 +256,8 @@ class DynaliteConfigPanel extends HTMLElement {
           <div class="dp-tab"        data-tab="logical">💡 Logical</div>
         </div>
 
-        <!-- Messages (shared) -->
-        <div id="dp-msg" class="dp-msg"></div>
+        <!-- Floating toast (shared) -->
+        <div id="dp-toast"></div>
 
         <!-- Physical tab -->
         <div id="dp-tab-physical" class="dp-tab-content active">
@@ -557,25 +578,35 @@ class DynaliteConfigPanel extends HTMLElement {
     const statusTxt = dev.online ? "Online" : "Offline";
     const dotClass  = dev.online ? "dp-dot-on" : "dp-dot-off";
 
+    card.style.position = "relative";
     card.innerHTML = `
-      <div class="dp-device-card-header">
+      <button class="dp-btn dp-btn-danger dp-btn-sm dp-dev-del" title="Delete this device"
+              style="position:absolute;top:14px;right:16px;">✕</button>
+      <div class="dp-device-card-header" style="padding-right:28px;">
         <span class="dp-dot ${dotClass}"></span>
         <span class="dp-device-card-title">${this._esc(displayName)}</span>
         <span class="dp-badge ${dev.online ? "dp-ok" : "dp-fail"}" style="font-size:11px;">${statusTxt}</span>
-        <button class="dp-btn dp-btn-ghost dp-btn-sm dp-dev-ping" title="Send sign-on to this device" style="flex-shrink:0;">📡</button>
       </div>
-      <div class="dp-device-card-meta">
-        Model: ${this._esc(dev.model)} &nbsp;·&nbsp;
-        Box: ${dev.box_number} &nbsp;·&nbsp;
-        Code: 0x${dev.device_code.toString(16).toUpperCase().padStart(2,"0")}
-        <br>${lastSeenTxt}
+      <div class="dp-device-card-meta" style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+        <div>
+          Model: ${this._esc(dev.model)} &nbsp;·&nbsp;
+          Box: ${dev.box_number} &nbsp;·&nbsp;
+          Code: 0x${dev.device_code.toString(16).toUpperCase().padStart(2,"0")}
+          <br>${lastSeenTxt}
+        </div>
+        ${dev.device_code === 0xB3 ? `
+        <button class="dp-btn dp-btn-sm dp-dev-lux" style="flex-shrink:0;
+                background:${dev.has_lux ? "#43a047" : "#9e9e9e"};color:#fff;"
+                title="${dev.has_lux ? "Lux sensor enabled — click to disable" : "Click to enable illuminance sensor"}">
+          💡 Lux${dev.has_lux ? " ✓" : ""}
+        </button>` : ""}
       </div>
       <div class="dp-device-rename-row">
         <input type="text" class="dp-device-rename-inp"
                placeholder="${this._esc(dev.model)} (Box ${dev.box_number})"
                value="${this._esc(dev.name)}">
         <button class="dp-btn dp-btn-ghost dp-btn-sm dp-dev-save">Save name</button>
-        <button class="dp-btn dp-btn-danger dp-btn-sm dp-dev-del" title="Delete this device">✕</button>
+        <button class="dp-btn dp-btn-ghost dp-btn-sm dp-dev-ping" title="Send sign-on to this device">📡</button>
       </div>`;
 
     card.querySelector(".dp-dev-ping").addEventListener("click", () => {
@@ -614,6 +645,9 @@ class DynaliteConfigPanel extends HTMLElement {
         })
         .catch(e => this._showMsg(e.message, true));
     });
+
+    const luxBtn = card.querySelector(".dp-dev-lux");
+    if (luxBtn) luxBtn.addEventListener("click", () => this._toggleLux(dev, card));
 
     card.querySelector(".dp-dev-del").addEventListener("click", () => {
       const label = dev.name || `${dev.model} (Box ${dev.box_number})`;
@@ -715,25 +749,67 @@ class DynaliteConfigPanel extends HTMLElement {
                  min="1" max="255" style="width:52px;"></td>
       <td><select class="dp-area-type">${areaTypeOpts}</select></td>
       <td>
-        <div class="dp-ch-list">${chHTML}</div>
-        <button class="dp-btn dp-btn-ghost dp-btn-sm dp-ch-add" style="margin-top:8px;">＋ Add Channel</button>
+        <!-- Blind area: curtain manager -->
+        <div class="dp-curtain-wrap" style="display:${areaType === 'blind' ? 'block' : 'none'};">
+          <div class="dp-curtain-list"></div>
+          <button class="dp-btn dp-btn-ghost dp-btn-sm dp-curtain-add" style="margin-top:8px;">＋ Add Curtain</button>
+        </div>
+        <!-- HVAC area: mode + fan config -->
+        <div class="dp-hvac-config" style="display:${areaType === 'hvac' ? 'block' : 'none'};font-size:12px;">
+        </div>
+        <!-- Light area: channel list -->
+        <div class="dp-ch-content" style="display:${areaType === 'light' ? 'block' : 'none'};">
+          <div class="dp-ch-list">${chHTML}</div>
+          <button class="dp-btn dp-btn-ghost dp-btn-sm dp-ch-add" style="margin-top:8px;">＋ Add Channel</button>
+        </div>
       </td>
-      <td>
-        <div class="dp-actions">
+      <td style="height:1px;padding:6px 14px;vertical-align:top;">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;
+                    justify-content:space-between;height:100%;min-height:90px;">
+          <!-- top: delete -->
+          <button class="dp-btn dp-btn-danger dp-btn-sm dp-area-del" title="Delete area">✕</button>
+          <!-- middle: sensor toggles -->
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="dp-btn dp-btn-sm dp-area-pir"
+                    style="background:${ar.has_pir ? "#43a047" : "#9e9e9e"};color:#fff;"
+                    title="${ar.has_pir ? "Motion enabled — click to disable" : "Click to enable motion sensor"}">
+              🚶 Motion${ar.has_pir ? " ✓" : ""}
+            </button>
+            <button class="dp-btn dp-btn-sm dp-area-temp"
+                    style="background:${ar.has_temp ? "#43a047" : "#9e9e9e"};color:#fff;"
+                    title="${ar.has_temp ? "Temp sensor enabled — click to disable" : "Click to enable temperature sensor"}">
+              🌡 Temp${ar.has_temp ? " ✓" : ""}
+            </button>
+          </div>
+          <!-- bottom: save (aligns with + Add Channel) -->
           <button class="dp-btn dp-btn-primary dp-btn-sm dp-area-save">Save Area</button>
-          <button class="dp-btn dp-btn-sm dp-area-pir dp-btn-sm"
-                  style="background:${ar.has_pir ? "#43a047" : "#9e9e9e"};color:#fff;"
-                  title="${ar.has_pir ? "PIR enabled — click to disable" : "Click to enable PIR motion sensor"}">
-            🔍 PIR${ar.has_pir ? " ✓" : ""}
-          </button>
-          <button class="dp-btn dp-btn-danger dp-btn-sm dp-area-del">Delete</button>
         </div>
       </td>`;
 
     tr.querySelector(".dp-area-save").addEventListener("click", () => this._saveArea(ar.area, tr));
     tr.querySelector(".dp-area-del").addEventListener("click",  () => this._deleteArea(ar.area));
     tr.querySelector(".dp-area-pir").addEventListener("click",  () => this._togglePir(ar.area, ar.has_pir, tr));
+    tr.querySelector(".dp-area-temp").addEventListener("click", () => this._toggleTemp(ar.area, ar.has_temp, tr));
     tr.querySelector(".dp-ch-add").addEventListener("click",    () => this._showAddChannelForm(ar.area, tr));
+
+    // Populate curtain rows from loaded data
+    const curtainList = tr.querySelector(".dp-curtain-list");
+    for (const c of (ar.curtains || [])) {
+      curtainList.appendChild(this._curtainRow(c));
+    }
+    tr.querySelector(".dp-curtain-add").addEventListener("click", () => {
+      curtainList.appendChild(this._curtainRow({name: "", open_preset: 1, stop_preset: 3, close_preset: 2}));
+    });
+
+    // Populate HVAC config
+    this._buildHvacConfig(tr.querySelector(".dp-hvac-config"), ar);
+
+    tr.querySelector(".dp-area-type").addEventListener("change", () => {
+      const newType = tr.querySelector(".dp-area-type").value;
+      tr.querySelector(".dp-curtain-wrap").style.display  = newType === "blind" ? "block" : "none";
+      tr.querySelector(".dp-hvac-config").style.display   = newType === "hvac"  ? "block" : "none";
+      tr.querySelector(".dp-ch-content").style.display    = newType === "light" ? "block" : "none";
+    });
 
     tr.querySelectorAll(".dp-ch-type-sel").forEach(sel => {
       sel.addEventListener("change", () => {
@@ -880,16 +956,243 @@ class DynaliteConfigPanel extends HTMLElement {
     const fadeSecs = parseFloat(tr.querySelector(".dp-fade").value) || 2;
     const presets  = parseInt(tr.querySelector(".dp-presets").value) || 4;
     const areaType = tr.querySelector(".dp-area-type").value;
-    try {
-      await this._ws("dynalite_pdeg/update_area", {
-        area: areaNum, name,
-        fade_tenths:  Math.round(fadeSecs * 10),
-        preset_count: presets,
-        area_type:    areaType,
+
+    // Collect curtains from DOM rows (only relevant for blind areas, but always sent)
+    const curtains = [];
+    tr.querySelectorAll(".dp-curtain-row").forEach(row => {
+      curtains.push({
+        name:         row.querySelector(".dp-curtain-name").value.trim(),
+        open_preset:  parseInt(row.querySelector(".dp-curtain-open").value)  || 1,
+        stop_preset:  parseInt(row.querySelector(".dp-curtain-stop").value)  || 3,
+        close_preset: parseInt(row.querySelector(".dp-curtain-close").value) || 2,
       });
+    });
+
+    // Collect HVAC config
+    const hvacModeMethod = tr.querySelector(".dp-hvac-mode-method")?.value || "";
+    const _hvacModeAreaRaw = parseInt(tr.querySelector(".dp-hvac-mode-area")?.value) || areaNum;
+    const hvacModeArea   = _hvacModeAreaRaw === areaNum ? 0 : _hvacModeAreaRaw;
+    const hvacModeCh0    = Math.max(0, (parseInt(tr.querySelector(".dp-hvac-mode-ch")?.value) || 1) - 1);
+    const hvacModeMap    = {};
+    tr.querySelectorAll(".dp-hvac-mode-map-row").forEach(row => {
+      const k = row.querySelector(".dp-hvac-map-key").value;
+      const v = parseInt(row.querySelector(".dp-hvac-map-val").value) || 0;
+      if (k) hvacModeMap[k] = v;
+    });
+    const hvacFanMethod = tr.querySelector(".dp-hvac-fan-method")?.value || "";
+    const _hvacFanAreaRaw = parseInt(tr.querySelector(".dp-hvac-fan-area")?.value) || areaNum;
+    const hvacFanArea   = _hvacFanAreaRaw === areaNum ? 0 : _hvacFanAreaRaw;
+    const hvacFanCh0    = Math.max(0, (parseInt(tr.querySelector(".dp-hvac-fan-ch")?.value) || 1) - 1);
+    const hvacFanMap    = {};
+    tr.querySelectorAll(".dp-hvac-fan-map-row").forEach(row => {
+      const k = row.querySelector(".dp-hvac-map-key").value;
+      const v = parseInt(row.querySelector(".dp-hvac-map-val").value) || 0;
+      if (k) hvacFanMap[k] = v;
+    });
+
+    // Setpoint step (0.5 or 1.0)
+    const stepEl = tr.querySelector(".dp-setpt-step:checked");
+    const setptStep = stepEl ? parseFloat(stepEl.value) : 0.5;
+
+    const payload = {
+      area: areaNum, name,
+      fade_tenths:      Math.round(fadeSecs * 10),
+      preset_count:     presets,
+      area_type:        areaType,
+      curtains,
+      hvac_mode_area:   hvacModeArea,
+      hvac_mode_method: hvacModeMethod,
+      hvac_mode_ch0:    hvacModeCh0,
+      hvac_mode_map:    hvacModeMap,
+      hvac_fan_area:    hvacFanArea,
+      hvac_fan_method:  hvacFanMethod,
+      hvac_fan_ch0:     hvacFanCh0,
+      hvac_fan_map:     hvacFanMap,
+      setpt_step:       setptStep,
+    };
+
+    try {
+      await this._ws("dynalite_pdeg/update_area", payload);
       this._showMsg(`Area ${areaNum} saved.`);
       await this._reloadAreas();
     } catch (e) { this._showMsg(e.message, true); }
+  }
+
+  // ── HVAC config builder ────────────────────────────────────────────────────
+
+  _buildHvacConfig(container, ar) {
+    container.innerHTML = "";
+
+    const HVAC_MODES = {off:"Off", cool:"Cool", heat:"Heat", fan_only:"Fan Only", auto:"Auto", dry:"Dry"};
+    const FAN_MODES  = {off:"Off", low:"Low", medium:"Medium", high:"High", auto:"Auto"};
+
+    const modeSection = this._hvacSection(
+      "HVAC Mode",
+      "dp-hvac-mode-method",
+      "dp-hvac-mode-area",
+      "dp-hvac-mode-ch",
+      "dp-hvac-mode-map-row",
+      "dp-hvac-mode-add",
+      ar.hvac_mode_method || "",
+      ar.hvac_mode_area   || 0,
+      ar.hvac_mode_ch0    || 0,
+      ar.hvac_mode_map    || {},
+      HVAC_MODES,
+      ar.area,
+    );
+    const fanSection = this._hvacSection(
+      "Fan Speed",
+      "dp-hvac-fan-method",
+      "dp-hvac-fan-area",
+      "dp-hvac-fan-ch",
+      "dp-hvac-fan-map-row",
+      "dp-hvac-fan-add",
+      ar.hvac_fan_method || "",
+      ar.hvac_fan_area   || 0,
+      ar.hvac_fan_ch0    || 0,
+      ar.hvac_fan_map    || {},
+      FAN_MODES,
+      ar.area,
+    );
+
+    // ── Setpoint step ──
+    const step = ar.setpt_step || 0.5;
+    const stepWrap = document.createElement("div");
+    stepWrap.style.cssText = "margin-bottom:10px;border:1px solid var(--divider-color,#e0e0e0);border-radius:6px;padding:8px;";
+    stepWrap.innerHTML = `
+      <div style="font-weight:500;margin-bottom:6px;">Setpoint Step</div>
+      <label style="margin-right:16px;cursor:pointer;">
+        <input type="radio" class="dp-setpt-step" name="dp-setpt-step-${ar.area}" value="0.5"
+          ${step === 0.5 ? "checked" : ""}> 0.5 °C
+      </label>
+      <label style="cursor:pointer;">
+        <input type="radio" class="dp-setpt-step" name="dp-setpt-step-${ar.area}" value="1"
+          ${step === 1.0 ? "checked" : ""}> 1 °C
+      </label>`;
+
+    container.appendChild(modeSection);
+    container.appendChild(fanSection);
+    container.appendChild(stepWrap);
+  }
+
+  _hvacSection(title, methodCls, areaCls, chCls, rowCls, addCls, method, areaNum, ch0, map, labelMap, defaultArea) {
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "margin-bottom:10px;border:1px solid var(--divider-color,#e0e0e0);border-radius:6px;padding:8px;";
+
+    const isPreset  = method === "preset";
+    const isChannel = method === "channel";
+    const unitLabel = isChannel ? "%" : "#";
+
+    const methodOpts = [
+      `<option value=""${method === "" ? " selected" : ""}>Not configured</option>`,
+      `<option value="preset"${isPreset ? " selected" : ""}>Preset</option>`,
+      `<option value="channel"${isChannel ? " selected" : ""}>Channel Level</option>`,
+    ].join("");
+
+    const keyOpts = Object.entries(labelMap)
+      .map(([v, l]) => `<option value="${v}">${l}</option>`)
+      .join("");
+
+    const displayArea = areaNum || defaultArea || 0;
+    wrap.innerHTML = `
+      <div style="font-weight:500;margin-bottom:6px;font-size:13px;">${title}</div>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:6px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:12px;">Method:</span>
+          <select class="${methodCls}" style="font-size:12px;">${methodOpts}</select>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:12px;">Area:</span>
+          <input type="number" class="${areaCls}" min="1" max="255" value="${displayArea}"
+                 style="width:52px;font-size:12px;">
+        </div>
+        <div class="${chCls}-wrap" style="display:${isChannel ? "flex" : "none"};align-items:center;gap:6px;">
+          <span style="font-size:12px;">Channel:</span>
+          <input type="number" class="${chCls}" min="1" max="64" value="${ch0 + 1}"
+                 style="width:52px;font-size:12px;">
+        </div>
+      </div>
+      <div class="${rowCls}-list" style="display:${method ? "block" : "none"};">
+      </div>
+      <button class="dp-btn dp-btn-ghost dp-btn-sm ${addCls}"
+              style="margin-top:4px;display:${method ? "block" : "none"};">＋ Add Row</button>`;
+
+    // Populate existing map rows
+    const rowList  = wrap.querySelector(`.${rowCls}-list`);
+    const addBtn   = wrap.querySelector(`.${addCls}`);
+    const methodSel = wrap.querySelector(`.${methodCls}`);
+    const chWrap   = wrap.querySelector(`.${chCls}-wrap`);
+
+    const makeRow = (key, val, unitLbl) => {
+      const div = document.createElement("div");
+      div.className = `${rowCls} dp-hvac-map-row`;
+      div.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap;";
+      const selOpts = Object.entries(labelMap)
+        .map(([v, l]) => `<option value="${v}"${v === key ? " selected" : ""}>${l}</option>`)
+        .join("");
+      div.innerHTML = `
+        <select class="dp-hvac-map-key" style="font-size:12px;">${selOpts}</select>
+        <span style="font-size:11px;color:var(--secondary-text-color);">→ <span class="dp-hvac-unit-lbl">${unitLbl === "%" ? "Level" : "Preset"}</span></span>
+        <input type="number" class="dp-hvac-map-val" min="0" max="255" value="${val}"
+               style="width:52px;font-size:12px;">
+        <span class="dp-hvac-unit-sym" style="font-size:11px;">${unitLbl}</span>
+        <button class="dp-btn dp-btn-danger dp-btn-sm dp-hvac-map-del">✕</button>`;
+      div.querySelector(".dp-hvac-map-del").addEventListener("click", () => div.remove());
+      return div;
+    };
+
+    for (const [k, v] of Object.entries(map)) {
+      rowList.appendChild(makeRow(k, v, unitLabel));
+    }
+
+    addBtn.addEventListener("click", () => {
+      const curMethod = methodSel.value;
+      const lbl = curMethod === "channel" ? "%" : "#";
+      rowList.appendChild(makeRow("", 1, lbl));
+    });
+
+    methodSel.addEventListener("change", () => {
+      const m = methodSel.value;
+      chWrap.style.display   = m === "channel" ? "flex"  : "none";
+      rowList.style.display  = m ? "block" : "none";
+      addBtn.style.display   = m ? "block" : "none";
+      // Update unit labels on existing rows
+      const isC = m === "channel";
+      wrap.querySelectorAll(".dp-hvac-unit-lbl").forEach(el => el.textContent = isC ? "Level" : "Preset");
+      wrap.querySelectorAll(".dp-hvac-unit-sym").forEach(el => el.textContent  = isC ? "%" : "#");
+    });
+
+    return wrap;
+  }
+
+  // ── Curtain row builder ────────────────────────────────────────────────────
+
+  _curtainRow(c) {
+    const div = document.createElement("div");
+    div.className = "dp-curtain-row";
+    div.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;";
+    div.innerHTML = `
+      <input type="text" class="dp-curtain-name dp-ch-inp"
+             placeholder="Curtain name" value="${this._esc(c.name || "")}"
+             style="width:130px;">
+      <label style="font-size:12px;display:flex;align-items:center;gap:3px;">
+        Open&nbsp;<input type="number" class="dp-curtain-open"
+                         min="1" max="255" value="${c.open_preset || 1}"
+                         style="width:46px;font-size:12px;">
+      </label>
+      <label style="font-size:12px;display:flex;align-items:center;gap:3px;">
+        Stop&nbsp;<input type="number" class="dp-curtain-stop"
+                         min="1" max="255" value="${c.stop_preset || 3}"
+                         style="width:46px;font-size:12px;">
+      </label>
+      <label style="font-size:12px;display:flex;align-items:center;gap:3px;">
+        Close&nbsp;<input type="number" class="dp-curtain-close"
+                          min="1" max="255" value="${c.close_preset || 2}"
+                          style="width:46px;font-size:12px;">
+      </label>
+      <button class="dp-btn dp-btn-danger dp-btn-sm dp-curtain-del" title="Remove curtain">✕</button>`;
+    div.querySelector(".dp-curtain-del").addEventListener("click", () => div.remove());
+    return div;
   }
 
   async _deleteArea(areaNum) {
@@ -947,12 +1250,42 @@ class DynaliteConfigPanel extends HTMLElement {
   async _togglePir(areaNum, currentlyEnabled, tr) {
     const enable = !currentlyEnabled;
     const action = enable ? "enable" : "disable";
-    if (!enable && !confirm(`Disable PIR motion sensor for Area ${areaNum}?\nThe motion sensor entity will be removed from HA.`)) return;
+    if (!enable && !confirm(`Disable motion sensor for Area ${areaNum}?\nThe motion sensor entity will be removed from HA.`)) return;
     try {
       await this._ws("dynalite_pdeg/set_pir", { area: areaNum, has_pir: enable });
-      this._showMsg(`PIR motion sensor ${enable ? "enabled" : "disabled"} for Area ${areaNum}.${enable ? " Motion entity created." : ""}`);
+      this._showMsg(`Motion sensor ${enable ? "enabled" : "disabled"} for Area ${areaNum}.${enable ? " Motion entity created." : ""}`);
       await this._reloadAreas();
-    } catch (e) { this._showMsg(`Failed to ${action} PIR: ` + e.message, true); }
+    } catch (e) { this._showMsg(`Failed to ${action} motion sensor: ` + e.message, true); }
+  }
+
+  async _toggleTemp(areaNum, currentlyEnabled, tr) {
+    const enable = !currentlyEnabled;
+    const action = enable ? "enable" : "disable";
+    if (!enable && !confirm(`Disable temperature sensor for Area ${areaNum}?\nThe temperature sensor entity will be removed from HA.`)) return;
+    try {
+      await this._ws("dynalite_pdeg/set_temp_sensor", { area: areaNum, has_temp: enable });
+      this._showMsg(`Temperature sensor ${enable ? "enabled" : "disabled"} for Area ${areaNum}.${enable ? " Temperature entity created." : ""}`);
+      await this._reloadAreas();
+    } catch (e) { this._showMsg(`Failed to ${action} temperature sensor: ` + e.message, true); }
+  }
+
+  async _toggleLux(dev, card) {
+    const enable = !dev.has_lux;
+    const label  = dev.name || `${dev.model} (Box ${dev.box_number})`;
+    if (!enable && !confirm(`Disable lux sensor for ${label}?\nThe illuminance entity will be removed from HA.`)) return;
+    try {
+      await this._ws("dynalite_pdeg/set_lux_sensor", {
+        device_code: dev.device_code,
+        box_number:  dev.box_number,
+        has_lux:     enable,
+      });
+      dev.has_lux = enable;
+      const btn = card.querySelector(".dp-dev-lux");
+      btn.style.background = enable ? "#43a047" : "#9e9e9e";
+      btn.title            = enable ? "Lux sensor enabled — click to disable" : "Click to enable illuminance sensor";
+      btn.textContent      = `💡 Lux${enable ? " ✓" : ""}`;
+      this._showMsg(`Lux sensor ${enable ? "enabled" : "disabled"} for ${label}.${enable ? " Illuminance entity created." : ""}`);
+    } catch (e) { this._showMsg("Failed to toggle lux sensor: " + e.message, true); }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
@@ -962,12 +1295,18 @@ class DynaliteConfigPanel extends HTMLElement {
   }
 
   _showMsg(text, isError = false) {
-    const el = this.querySelector("#dp-msg");
-    el.textContent  = text;
-    el.className    = "dp-msg " + (isError ? "dp-msg-err" : "dp-msg-ok");
-    el.style.display = "block";
+    const el = this.querySelector("#dp-toast");
+    // Reset animation by removing the show class first
+    el.classList.remove("dp-toast-show");
+    el.className = "dp-msg-" + (isError ? "err" : "ok");   // colour class only
+    el.textContent = text;
+    // Force a reflow so the transition re-fires even for rapid consecutive calls
+    void el.offsetWidth;
+    el.classList.add("dp-toast-show");
     clearTimeout(this._msgTimer);
-    this._msgTimer = setTimeout(() => { el.style.display = "none"; }, 6000);
+    this._msgTimer = setTimeout(() => {
+      el.classList.remove("dp-toast-show");
+    }, 5000);
   }
 
   _esc(s) {

@@ -91,6 +91,17 @@ class DynaliteStorage:
                 area_type=a.get("area_type", AREA_TYPE_LIGHT),
                 has_pir=bool(a.get("has_pir", False)),
                 occ_enabled=bool(a.get("occ_enabled", True)),
+                curtains=a.get("curtains", []),
+                hvac_mode_area=int(a.get("hvac_mode_area", 0)),
+                hvac_mode_method=a.get("hvac_mode_method", ""),
+                hvac_mode_ch0=int(a.get("hvac_mode_ch0", 0)),
+                hvac_mode_map=a.get("hvac_mode_map", {}),
+                hvac_fan_area=int(a.get("hvac_fan_area", 0)),
+                hvac_fan_method=a.get("hvac_fan_method", ""),
+                hvac_fan_ch0=int(a.get("hvac_fan_ch0", 0)),
+                hvac_fan_map=a.get("hvac_fan_map", {}),
+                setpt_step=float(a.get("setpt_step", 0.5)),
+                has_temp=bool(a.get("has_temp", False)),
             )
 
             for c in a.get("channels", []):
@@ -132,6 +143,7 @@ class DynaliteStorage:
                 box_number=int(box),
                 model=model,
                 name=d.get("name", ""),
+                has_lux=bool(d.get("has_lux", False)),
             )
 
         # Restore configurable settings
@@ -185,6 +197,17 @@ class DynaliteStorage:
                     "area_type": ar.area_type,
                     "has_pir": ar.has_pir,
                     "occ_enabled": ar.occ_enabled,
+                    "curtains": ar.curtains,
+                    "hvac_mode_area":   ar.hvac_mode_area,
+                    "hvac_mode_method": ar.hvac_mode_method,
+                    "hvac_mode_ch0":    ar.hvac_mode_ch0,
+                    "hvac_mode_map":    ar.hvac_mode_map,
+                    "hvac_fan_area":    ar.hvac_fan_area,
+                    "hvac_fan_method":  ar.hvac_fan_method,
+                    "hvac_fan_ch0":     ar.hvac_fan_ch0,
+                    "hvac_fan_map":     ar.hvac_fan_map,
+                    "setpt_step":       ar.setpt_step,
+                    "has_temp":         ar.has_temp,
                     "channels": channels,
                 }
             )
@@ -195,6 +218,7 @@ class DynaliteStorage:
                 "device_code": dev.device_code,
                 "box_number":  dev.box_number,
                 "name":        dev.name,
+                "has_lux":     dev.has_lux,
             }
             for dev in coordinator.devices.values()
         ]

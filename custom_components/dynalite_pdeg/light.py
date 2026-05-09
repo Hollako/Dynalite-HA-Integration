@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import DynaliteConfigEntry
 from .const import LOGGER, ha_brightness_to_pct, pct_to_ha_brightness, signal_channel
-from .coordinator import CHANNEL_TYPE_DIMMER, CHANNEL_TYPE_ONOFF, ChannelState, DynaliteCoordinator
+from .coordinator import AREA_TYPE_HVAC, CHANNEL_TYPE_DIMMER, CHANNEL_TYPE_ONOFF, ChannelState, DynaliteCoordinator
 from .entity import DynaliteChannelEntity
 
 
@@ -35,6 +35,10 @@ async def async_setup_entry(
     def _add_new_channels() -> None:
         new_entities = []
         for ar in coordinator.areas.values():
+            # HVAC areas have no light channels — their channels are mode/fan
+            # control signals managed exclusively by the climate entity.
+            if ar.area_type == AREA_TYPE_HVAC:
+                continue
             for ch in ar.channels.values():
                 key = (ch.area, ch.ch0)
                 if key not in known:

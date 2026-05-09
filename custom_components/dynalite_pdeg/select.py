@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import DynaliteConfigEntry
-from .coordinator import AreaState, DynaliteCoordinator
+from .coordinator import AREA_TYPE_LIGHT, AreaState, DynaliteCoordinator
 from .entity import DynaliteAreaEntity
 
 # Default Dynalite preset names (1-indexed)
@@ -25,7 +25,7 @@ async def async_setup_entry(
     def _add_selects() -> None:
         new_entities = []
         for ar in coordinator.areas.values():
-            if ar.area not in known:
+            if ar.area_type == AREA_TYPE_LIGHT and ar.area not in known:
                 known.add(ar.area)
                 new_entities.append(DynalitePresetSelect(coordinator, ar.area))
         if new_entities:

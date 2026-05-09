@@ -10,6 +10,7 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, LOGGER
+from .coordinator import AREA_TYPE_BLIND, AREA_TYPE_HVAC, AREA_TYPE_LIGHT
 
 if TYPE_CHECKING:
     from .coordinator import DynaliteCoordinator
@@ -26,6 +27,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_delete_channel)
     websocket_api.async_register_command(hass, ws_run_scan)
     websocket_api.async_register_command(hass, ws_set_pir)
+    websocket_api.async_register_command(hass, ws_set_temp_sensor)
     websocket_api.async_register_command(hass, ws_list_devices)
     websocket_api.async_register_command(hass, ws_update_device)
     websocket_api.async_register_command(hass, ws_add_device)
@@ -37,6 +39,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_parse_xml)
     websocket_api.async_register_command(hass, ws_import_logical)
     websocket_api.async_register_command(hass, ws_import_devices)
+    websocket_api.async_register_command(hass, ws_set_lux_sensor)
     LOGGER.debug("[WS] websocket commands registered")
 
 
@@ -45,6 +48,120 @@ def _get_coordinator(hass: HomeAssistant, entry_id: str) -> DynaliteCoordinator 
     if entry and hasattr(entry, "runtime_data") and entry.runtime_data:
         return entry.runtime_data
     return None
+
+
+def _remove_all_area_entities(
+    hass: HomeAssistant,
+    host: str,
+    area: int,
+    ar,  # AreaState — used to know channel list, curtain count, area_type
+) -> None:
+    """Remove every HA entity that belongs to the given area number.
+
+    Called when the user deletes an area from the panel so nothing lingers
+    in the entity registry until the next restart.
+    """
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+    ent_reg = er.async_get(hass)
+
+    # ── Preset selector + Save-preset button (light areas) ───────────────────
+    _remove_uid(ent_reg, "select",        DOMAIN, f"{host}_a{area}_preset")
+    _remove_uid(ent_reg, "button",        DOMAIN, f"{host}_a{area}_save_preset")
+
+    # ── PIR motion sensor ─────────────────────────────────────────────────────
+    _remove_uid(ent_reg, "binary_sensor", DOMAIN, f"{host}_a{area}_motion")
+
+    # ── Temperature / setpoint sensors ───────────────────────────────────────
+    _remove_uid(ent_reg, "sensor",        DOMAIN, f"{host}_a{area}_temp")
+    _remove_uid(ent_reg, "sensor",        DOMAIN, f"{host}_a{area}_setpt")
+
+    # ── Climate entity ────────────────────────────────────────────────────────
+    _remove_uid(ent_reg, "climate",       DOMAIN, f"{host}_a{area}_climate")
+
+    # ── Curtain cover entities (blind areas) ──────────────────────────────────
+    for idx in range(len(ar.curtains)):
+        _remove_uid(ent_reg, "cover", DOMAIN, f"{host}_a{area}_curtain_{idx}")
+
+    # ── Channel-based entities (light areas) ──────────────────────────────────
+    for ch0, ch in ar.channels.items():
+        if ch.channel_type == "dimmer":
+            _remove_uid(ent_reg, "light",  DOMAIN, f"{host}_a{area}_c{ch0}_light")
+        elif ch.channel_type == "onoff":
+            _remove_uid(ent_reg, "light",  DOMAIN, f"{host}_a{area}_c{ch0}_light_onoff")
+        elif ch.channel_type == "switch":
+            _remove_uid(ent_reg, "switch", DOMAIN, f"{host}_a{area}_c{ch0}_switch")
+        elif ch.channel_type == "cover" and ch.cover_partner_ch0 is not None:
+            _remove_uid(ent_reg, "cover",  DOMAIN,
+                        f"{host}_a{area}_cover_{ch0}_{ch.cover_partner_ch0}")
+
+    # ── Area device itself ────────────────────────────────────────────────────
+    dev_reg   = dr.async_get(hass)
+    ha_device = dev_reg.async_get_device(identifiers={(DOMAIN, f"area_{area}")})
+    if ha_device:
+        dev_reg.async_remove_device(ha_device.id)
+        LOGGER.info("[WS] removed area device for area %d", area)
+
+    LOGGER.info("[WS] removed all entities for area %d", area)
+
+
+def _remove_light_only_entities(
+    hass: HomeAssistant,
+    host: str,
+    area: int,
+    channels: dict,
+) -> None:
+    """Remove preset-select, save-preset-button, and all light/switch channel entities.
+
+    Called when an area's type changes away from 'light' so stale entities
+    do not linger in the HA entity registry.
+    """
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    ent_reg = er.async_get(hass)
+
+    # Preset selector
+    _remove_uid(ent_reg, "select", DOMAIN, f"{host}_a{area}_preset")
+    # Save-preset button
+    _remove_uid(ent_reg, "button", DOMAIN, f"{host}_a{area}_save_preset")
+
+    # Light / switch channel entities
+    for ch0, ch in channels.items():
+        if ch.channel_type == "dimmer":
+            _remove_uid(ent_reg, "light", DOMAIN, f"{host}_a{area}_c{ch0}_light")
+        elif ch.channel_type == "onoff":
+            _remove_uid(ent_reg, "light", DOMAIN, f"{host}_a{area}_c{ch0}_light_onoff")
+        elif ch.channel_type == "switch":
+            _remove_uid(ent_reg, "switch", DOMAIN, f"{host}_a{area}_c{ch0}_switch")
+
+
+def _remove_uid(ent_reg, platform: str, domain: str, uid: str) -> None:
+    entity_id = ent_reg.async_get_entity_id(platform, domain, uid)
+    if entity_id:
+        ent_reg.async_remove(entity_id)
+        LOGGER.info("[WS] removed entity %s", entity_id)
+
+
+def _remove_curtain_entities_above(
+    hass: HomeAssistant,
+    host: str,
+    area: int,
+    new_count: int,
+    old_count: int,
+) -> None:
+    """Remove cover entities for curtain indices that no longer exist."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    if new_count >= old_count:
+        return
+    ent_reg = er.async_get(hass)
+    for idx in range(new_count, old_count):
+        uid       = f"{host}_a{area}_curtain_{idx}"
+        entity_id = ent_reg.async_get_entity_id("cover", DOMAIN, uid)
+        if entity_id:
+            ent_reg.async_remove(entity_id)
+            LOGGER.info("[WS] removed orphaned curtain entity %s", entity_id)
 
 
 def _remove_channel_entity(
@@ -105,8 +222,19 @@ async def ws_list_areas(
             "name":         ar.name,
             "fade_tenths":  ar.fade_tenths,
             "preset_count": ar.preset_count,
-            "area_type":    ar.area_type,
-            "has_pir":      ar.has_pir,
+            "area_type":       ar.area_type,
+            "has_pir":         ar.has_pir,
+            "has_temp":        ar.has_temp,
+            "curtains":        ar.curtains,
+            "hvac_mode_area":   ar.hvac_mode_area,
+            "hvac_mode_method": ar.hvac_mode_method,
+            "hvac_mode_ch0":    ar.hvac_mode_ch0,
+            "hvac_mode_map":    ar.hvac_mode_map,
+            "hvac_fan_area":    ar.hvac_fan_area,
+            "hvac_fan_method":  ar.hvac_fan_method,
+            "hvac_fan_ch0":     ar.hvac_fan_ch0,
+            "hvac_fan_map":     ar.hvac_fan_map,
+            "setpt_step":       ar.setpt_step,
             "channels": sorted(
                 [
                     {
@@ -132,7 +260,17 @@ async def ws_list_areas(
     vol.Optional("name",         default=""): str,
     vol.Optional("fade_tenths",  default=20): vol.All(int, vol.Range(min=0, max=6000)),
     vol.Optional("preset_count", default=4):  vol.All(int, vol.Range(min=1, max=255)),
-    vol.Optional("area_type",    default="light"): str,
+    vol.Optional("area_type",        default="light"): str,
+    vol.Optional("curtains",         default=[]):      list,
+    vol.Optional("hvac_mode_area",    default=0):       vol.All(int, vol.Range(min=0, max=255)),
+    vol.Optional("hvac_mode_method", default=""):      str,
+    vol.Optional("hvac_mode_ch0",    default=0):       int,
+    vol.Optional("hvac_mode_map",    default={}):      dict,
+    vol.Optional("hvac_fan_area",    default=0):       vol.All(int, vol.Range(min=0, max=255)),
+    vol.Optional("hvac_fan_method",  default=""):      str,
+    vol.Optional("hvac_fan_ch0",     default=0):       int,
+    vol.Optional("hvac_fan_map",     default={}):      dict,
+    vol.Optional("setpt_step",       default=0.5):     vol.All(vol.Coerce(float), vol.In([0.5, 1.0])),
 })
 @websocket_api.async_response
 async def ws_update_area(
@@ -145,13 +283,69 @@ async def ws_update_area(
         connection.send_error(msg["id"], "not_found", "Integration not found")
         return
 
-    ar = coord._touch_area(msg["area"])  # noqa: SLF001
+    area_num = msg["area"]
+    ar = coord._touch_area(area_num)  # noqa: SLF001
+    old_type          = ar.area_type
+    old_curtain_count = len(ar.curtains)
+
     ar.name         = msg["name"]
     ar.fade_tenths  = msg["fade_tenths"]
     ar.preset_count = msg["preset_count"]
     ar.area_type    = msg["area_type"]
+
+    # Normalise each curtain dict to guarantee all required keys exist
+    new_curtains: list[dict] = []
+    for c in msg.get("curtains", []):
+        new_curtains.append({
+            "name":         str(c.get("name", "")),
+            "open_preset":  int(c.get("open_preset",  1)),
+            "stop_preset":  int(c.get("stop_preset",  3)),
+            "close_preset": int(c.get("close_preset", 2)),
+        })
+    ar.curtains = new_curtains
+
+    # HVAC mode / fan config (values are safe dicts/strings from the panel)
+    ar.hvac_mode_area   = int(msg.get("hvac_mode_area", 0))
+    ar.hvac_mode_method = msg.get("hvac_mode_method", "")
+    ar.hvac_mode_ch0    = int(msg.get("hvac_mode_ch0", 0))
+    ar.hvac_mode_map    = {str(k): int(v) for k, v in msg.get("hvac_mode_map", {}).items()}
+    ar.hvac_fan_area    = int(msg.get("hvac_fan_area", 0))
+    ar.hvac_fan_method  = msg.get("hvac_fan_method", "")
+    ar.hvac_fan_ch0     = int(msg.get("hvac_fan_ch0", 0))
+    ar.hvac_fan_map     = {str(k): int(v) for k, v in msg.get("hvac_fan_map", {}).items()}
+    ar.setpt_step       = float(msg.get("setpt_step", 0.5))
+
+    # Remove HA entities for any curtain slots that were deleted
+    _remove_curtain_entities_above(hass, coord.host, area_num, len(new_curtains), old_curtain_count)
+
+    type_changed     = old_type != ar.area_type
+    curtains_added   = len(new_curtains) > old_curtain_count
+
+    # When leaving 'light' type: remove preset/save-preset/channel entities
+    if type_changed and old_type == AREA_TYPE_LIGHT:
+        _remove_light_only_entities(hass, coord.host, area_num, ar.channels)
+
     coord.schedule_save()
-    LOGGER.info("[WS] updated area %d", msg["area"])
+    LOGGER.info("[WS] updated area %d (type: %s→%s, curtains: %d→%d)",
+                area_num, old_type, ar.area_type, old_curtain_count, len(new_curtains))
+
+    # Fire entity-creation callbacks:
+    # - always when type changed (new area_type may need new entities)
+    # - also when curtains were added to an existing blind area
+    if type_changed or curtains_added:
+        if ar.area_type == AREA_TYPE_HVAC:
+            for cb in coord.on_new_climate_cbs:
+                cb()
+        for cb in coord.on_new_area_cbs:
+            cb()
+
+    # Always push a signal_area so existing entities (climate, sensors, …)
+    # pick up any changed fields (setpt_step, name, fade, etc.) immediately
+    # without requiring a restart or reload.
+    from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+    from .const import signal_area  # noqa: PLC0415
+    async_dispatcher_send(hass, signal_area(area_num), ar)
+
     connection.send_result(msg["id"], {"ok": True})
 
 
@@ -197,7 +391,10 @@ async def ws_delete_area(
         return
 
     area_num = msg["area"]
-    if area_num in coord.areas:
+    ar = coord.areas.get(area_num)
+    if ar is not None:
+        # Remove every HA entity that belongs to this area before wiping state
+        _remove_all_area_entities(hass, coord.host, area_num, ar)
         del coord.areas[area_num]
         coord.schedule_save()
         LOGGER.info("[WS] deleted area %d", area_num)
@@ -423,6 +620,60 @@ async def ws_set_pir(
     connection.send_result(msg["id"], {"ok": True, "has_pir": ar.has_pir})
 
 
+# ── set_temp_sensor ───────────────────────────────────────────────────────────
+
+@websocket_api.websocket_command({
+    vol.Required("type"):     "dynalite_pdeg/set_temp_sensor",
+    vol.Required("entry_id"): str,
+    vol.Required("area"):     vol.All(int, vol.Range(min=1, max=255)),
+    vol.Required("has_temp"): bool,
+})
+@websocket_api.async_response
+async def ws_set_temp_sensor(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Enable or disable a temperature sensor on a logical area.
+
+    Enabling  → sets has_temp=True, fires on_new_sensor_cbs to create the entity.
+    Disabling → sets has_temp=False, removes the entity from the registry,
+                fires on_remove_sensor_cbs so the area can be re-enabled later.
+    """
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+
+    area_num = msg["area"]
+    ar = coord.areas.get(area_num)
+    if not ar:
+        connection.send_error(msg["id"], "not_found", f"Area {area_num} not found")
+        return
+
+    ar.has_temp = msg["has_temp"]
+    coord.schedule_save()
+
+    if msg["has_temp"]:
+        for cb in coord.on_new_sensor_cbs:
+            cb()
+        LOGGER.info("[WS] temperature sensor enabled for area %d", area_num)
+    else:
+        ent_reg   = er.async_get(hass)
+        uid       = f"{coord.host}_a{area_num}_temp"
+        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, uid)
+        if entity_id:
+            ent_reg.async_remove(entity_id)
+            LOGGER.info("[WS] removed temperature sensor entity %s", entity_id)
+        for cb in coord.on_remove_sensor_cbs:
+            cb(area_num)
+        LOGGER.info("[WS] temperature sensor disabled for area %d", area_num)
+
+    connection.send_result(msg["id"], {"ok": True, "has_temp": ar.has_temp})
+
+
 # ── list_devices ──────────────────────────────────────────────────────────────
 
 @websocket_api.websocket_command({
@@ -456,6 +707,7 @@ async def ws_list_devices(
             "name":        dev.name,
             "online":      online,
             "last_seen_s": age_s,
+            "has_lux":     dev.has_lux,
         })
 
     connection.send_result(msg["id"], {
@@ -915,3 +1167,61 @@ async def ws_import_devices(
             cb()
 
     connection.send_result(msg["id"], {"ok": True, "imported": imported, "skipped": skipped})
+
+
+# ── set_lux_sensor ────────────────────────────────────────────────────────────
+
+@websocket_api.websocket_command({
+    vol.Required("type"):        "dynalite_pdeg/set_lux_sensor",
+    vol.Required("entry_id"):    str,
+    vol.Required("device_code"): int,
+    vol.Required("box_number"):  int,
+    vol.Required("has_lux"):     bool,
+})
+@websocket_api.async_response
+async def ws_set_lux_sensor(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Enable or disable an illuminance sensor on a physical device.
+
+    Enabling  → sets has_lux=True, fires on_new_lux_cbs to create the entity.
+    Disabling → sets has_lux=False, removes the entity from the registry,
+                fires on_remove_lux_cbs so it can be re-enabled later.
+    """
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+
+    key = (msg["device_code"], msg["box_number"])
+    dev = coord.devices.get(key)
+    if not dev:
+        connection.send_error(msg["id"], "not_found",
+                              f"Device 0x{msg['device_code']:02X} box {msg['box_number']} not found")
+        return
+
+    dev.has_lux = msg["has_lux"]
+    coord.schedule_save()
+
+    if msg["has_lux"]:
+        for cb in coord.on_new_lux_cbs:
+            cb()
+        LOGGER.info("[WS] lux sensor enabled for device 0x%02X box %d",
+                    msg["device_code"], msg["box_number"])
+    else:
+        ent_reg   = er.async_get(hass)
+        uid       = f"{coord.host}_lux_{msg['device_code']}_{msg['box_number']}"
+        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, uid)
+        if entity_id:
+            ent_reg.async_remove(entity_id)
+            LOGGER.info("[WS] removed lux sensor entity %s", entity_id)
+        for cb in coord.on_remove_lux_cbs:
+            cb(msg["device_code"], msg["box_number"])
+        LOGGER.info("[WS] lux sensor disabled for device 0x%02X box %d",
+                    msg["device_code"], msg["box_number"])
+
+    connection.send_result(msg["id"], {"ok": True, "has_lux": dev.has_lux})

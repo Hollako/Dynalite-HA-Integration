@@ -16,6 +16,8 @@ from .const import (
     DOMAIN,
     LOGGER,
     OP_LEVEL_REPORT,
+    OP_LUX_REPORT,
+    OP_MOTION_DETECT,
     OP_OCC_DISABLE,
     OP_OCC_ENABLE,
     OP_OCCUPANCY,
@@ -26,6 +28,7 @@ from .const import (
     OP_SIGNON_REPLY_AC,
     OP_SIGNON_REQUEST,
     OP_TEMP_REPORT,
+    OP_TEMP_REPORT_ALT,
     RELAY_DEVICE_CODES,
     SENSOR_DEVICE_CODES,
     SIGNON_INTERVAL,
@@ -39,6 +42,7 @@ from .const import (
     signal_channel,
     signal_connection,
     signal_device,
+    signal_lux,
 )
 from .dynalite_client import DynaliteClient
 
@@ -85,6 +89,25 @@ class AreaState:
     temp_c: float = math.nan
     has_setpt: bool = False
     setpt_c: float = math.nan
+    # Blind area — list of curtain dicts, each:
+    #   {"name": str, "open_preset": int, "stop_preset": int, "close_preset": int}
+    curtains: list = field(default_factory=list)
+    # HVAC mode control (area_type == "hvac" only)
+    #   method: "" | "preset" | "channel"
+    #   area:   0  = same area as the HVAC area; non-zero = a different Dynalite area
+    #   map: {ha_mode_str: preset1} for preset method
+    #        {ha_mode_str: level_pct} for channel method
+    hvac_mode_area:   int  = 0
+    hvac_mode_method: str  = ""
+    hvac_mode_ch0:    int  = 0
+    hvac_mode_map:    dict = field(default_factory=dict)
+    # HVAC fan speed control
+    hvac_fan_area:    int  = 0
+    hvac_fan_method:  str  = ""
+    hvac_fan_ch0:     int  = 0
+    hvac_fan_map:     dict = field(default_factory=dict)
+    # Setpoint step size in °C (0.5 or 1.0)
+    setpt_step: float = 0.5
     channels: dict[int, ChannelState] = field(default_factory=dict)  # keyed by ch0
 
     def display_name(self) -> str:
@@ -98,6 +121,8 @@ class PhysicalDevice:
     area: int = 0
     model: str = ""
     name: str = ""          # user-defined custom name (empty = use model default)
+    has_lux: bool = False
+    lux_value: float | None = None
 
 
 # ── Coordinator ───────────────────────────────────────────────────────────────
@@ -124,8 +149,11 @@ class DynaliteCoordinator:
         self.on_new_pir_cbs:     list[callable] = []   # type: ignore[type-arg]
         self.on_remove_pir_cbs:  list[callable] = []   # type: ignore[type-arg]  called with area:int when PIR is disabled
         self.on_new_sensor_cbs:  list[callable] = []   # type: ignore[type-arg]
-        self.on_new_climate_cbs: list[callable] = []   # type: ignore[type-arg]
-        self.on_new_device_cbs:  list[callable] = []   # type: ignore[type-arg]
+        self.on_remove_sensor_cbs: list[callable] = []  # type: ignore[type-arg]  called with area:int when temp sensor disabled
+        self.on_new_climate_cbs:  list[callable] = []   # type: ignore[type-arg]
+        self.on_new_device_cbs:   list[callable] = []   # type: ignore[type-arg]
+        self.on_new_lux_cbs:      list[callable] = []   # type: ignore[type-arg]
+        self.on_remove_lux_cbs:   list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when lux disabled
         # Storage — injected by __init__.py after construction
         self._storage = None
         self._save_task: asyncio.Task | None = None
@@ -260,6 +288,8 @@ class DynaliteCoordinator:
             ar = self._touch_area(area_num)
             ar.preset0 = preset0
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            # Also notify any HVAC area whose mode/fan is preset-controlled from this area
+            self._forward_hvac_signal(area_num)
             LOGGER.debug("[A%d] preset → %d (bank %d)", area_num, preset0 + 1, b[5])
             # Preset changed from any source (HA, System Builder, panel) —
             # poll channel levels so HA reflects the new state immediately.
@@ -275,6 +305,16 @@ class DynaliteCoordinator:
             ch.is_on = pct > 0
             async_dispatcher_send(self.hass, signal_channel(area_num, ch0), ch)
             LOGGER.debug("[A%d Ch%d] level %d%%", area_num, ch0 + 1, pct)
+            # Refresh any HVAC climate entity whose mode/fan channel just changed.
+            # Covers both same-area and cross-area control configurations.
+            for hvac_ar in self.areas.values():
+                eff_mode = hvac_ar.hvac_mode_area or hvac_ar.area
+                eff_fan  = hvac_ar.hvac_fan_area  or hvac_ar.area
+                if (
+                    (hvac_ar.hvac_mode_method == "channel" and eff_mode == area_num and hvac_ar.hvac_mode_ch0 == ch0) or
+                    (hvac_ar.hvac_fan_method  == "channel" and eff_fan  == area_num and hvac_ar.hvac_fan_ch0  == ch0)
+                ):
+                    async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
 
         elif opcode == OP_OCCUPANCY:
             occupied = b[5] == 1
@@ -299,20 +339,40 @@ class DynaliteCoordinator:
             ar.occ_enabled = False
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
 
-        elif opcode == OP_TEMP_REPORT:
+        elif opcode == OP_MOTION_DETECT:
+            # Instantaneous motion trigger (0x2E).
+            # b[2] = triggering channel, 0-based (0x00=ch1, 0x01=ch2, … 0xFF=all channels).
+            # Always means motion IS present; vacancy comes later via OP_OCCUPANCY (0x31).
+            ch_raw = b[2]
+            ch_label = "all" if ch_raw == 0xFF else str(ch_raw + 1)
             ar = self._touch_area(area_num)
-            is_new = not ar.has_temp
-            ar.has_temp = True
-            ar.temp_c   = self._decode_temp(b[4], b[5])
-            if is_new:
-                for cb in self.on_new_sensor_cbs:
+            is_new_pir = not ar.has_pir
+            ar.has_pir      = True
+            ar.pir_occupied = True
+            if is_new_pir:
+                for cb in self.on_new_pir_cbs:
                     cb()
-                if ar.has_setpt:
-                    for cb in self.on_new_climate_cbs:
-                        cb()
                 self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
-            LOGGER.debug("[A%d] temp %.1f°C", area_num, ar.temp_c)
+            LOGGER.debug("[A%d] 0x2E motion trigger  ch=%s", area_num, ch_label)
+
+        elif opcode == OP_TEMP_REPORT:
+            # 0x4A format: b[4] = integer °C (signed byte), b[5] = hundredths.
+            # Always store the value so climate entities can show current_temperature,
+            # but do NOT auto-enable has_temp — that is controlled only by the user
+            # via the panel toggle (ws_set_temp_sensor).
+            ar = self._touch_area(area_num)
+            ar.temp_c = self._decode_temp_4a(b[4], b[5])
+            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            LOGGER.debug("[A%d] temp %.2f°C (0x4A)", area_num, ar.temp_c)
+
+        elif opcode == OP_TEMP_REPORT_ALT:
+            # 0xF6 fallback: Q2 signed int16 (°C × 4). Same policy — store but
+            # do not auto-enable has_temp.
+            ar = self._touch_area(area_num)
+            ar.temp_c = self._decode_temp(b[4], b[5])
+            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            LOGGER.debug("[A%d] temp %.2f°C (0xF6/Q2)", area_num, ar.temp_c)
 
         elif opcode == OP_SETPOINT_REPORT:
             ar = self._touch_area(area_num)
@@ -338,6 +398,34 @@ class DynaliteCoordinator:
         if opcode == OP_SIGNON_REPLY:  # 0x00 = Device Identify reply
             # RX: 5C [dc] [bn] 0x00 [fw_major] [fw_minor] [boot] [cs]
             self._handle_signon_reply(device_code, box_number, b)
+            return
+
+        if opcode == OP_LUX_REPORT:  # 0xB8 — ambient light level
+            # RX: 5C [dc] [bn] 0xB8 [01] [00] [lux] [cs]
+            # Register device if first time seen
+            if key not in self.devices:
+                model = DEVICE_NAMES.get(device_code, f"Device 0x{device_code:02X}")
+                dev = PhysicalDevice(device_code=device_code, box_number=box_number, model=model)
+                self.devices[key] = dev
+                for cb in self.on_new_device_cbs:
+                    cb()
+                self.schedule_save()
+            dev = self.devices[key]
+            # b[5] = high byte (each unit = 256 lux), b[6] = low byte (1–255 lux)
+            lux = b[5] * 256 + b[6]
+            dev.lux_value = float(lux)
+            # Auto-enable the lux sensor the first time a reading arrives,
+            # but only for D5 Sensor (0xB3) — the only device that sends lux.
+            if not dev.has_lux and device_code == 0xB3:
+                dev.has_lux = True
+                for cb in self.on_new_lux_cbs:
+                    cb()
+                self.schedule_save()
+                LOGGER.info("[Device 0x%02X box %d] lux sensor auto-enabled (%d lx)",
+                            device_code, box_number, lux)
+            async_dispatcher_send(self.hass, signal_lux(device_code, box_number))
+            LOGGER.debug("[Device 0x%02X box %d] lux = %d lx (hi=%d lo=%d)",
+                         device_code, box_number, lux, b[5], b[6])
             return
 
         # Any other physical frame — register device if new, no online update
@@ -534,11 +622,32 @@ class DynaliteCoordinator:
 
     @staticmethod
     def _decode_temp(hi: int, lo: int) -> float:
-        """Decode Dynalite fixed-point temperature (Q2, 0.25 °C steps)."""
+        """Decode Dynalite Q2 temperature (opcode 0xF6): signed int16, °C × 4."""
         raw = (hi << 8) | lo
         if raw & 0x8000:
             raw -= 0x10000
         return raw / 4.0
+
+    @staticmethod
+    def _decode_temp_4a(integer_byte: int, hundredths_byte: int) -> float:
+        """Decode Dynalite 0x4A temperature: b[4]=signed integer °C, b[5]=hundredths."""
+        integer_part = integer_byte if integer_byte < 128 else integer_byte - 256
+        frac = hundredths_byte / 100.0
+        return integer_part + frac if integer_part >= 0 else integer_part - frac
+
+    # ── Cross-area HVAC forwarding ────────────────────────────────────────────
+
+    def _forward_hvac_signal(self, control_area_num: int) -> None:
+        """Dispatch signal_area for any HVAC area whose mode/fan is controlled
+        from a *different* area (control_area_num).  Same-area cases are
+        already covered by the regular signal_area dispatch."""
+        for hvac_ar in self.areas.values():
+            if hvac_ar.area == control_area_num:
+                continue
+            eff_mode = hvac_ar.hvac_mode_area or hvac_ar.area
+            eff_fan  = hvac_ar.hvac_fan_area  or hvac_ar.area
+            if eff_mode == control_area_num or eff_fan == control_area_num:
+                async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
 
     # ── Command passthrough (called by HA entities) ───────────────────────────
 
@@ -546,8 +655,15 @@ class DynaliteCoordinator:
         ar   = self.areas.get(area)
         fade = ar.fade_tenths if ar else 20
         await self.client.select_preset(area, preset1, fade)
-        # Confirm which preset is now active — the OP_PRESET_REPORT response
-        # will automatically trigger a channel level poll via _poll_channels().
+        # Optimistic: update ar.preset0 immediately so HA shows the new
+        # preset/mode before the bus round-trip comes back.
+        if ar is not None:
+            ar.preset0 = preset1 - 1
+            async_dispatcher_send(self.hass, signal_area(area), ar)
+            # Notify any HVAC area that uses this area as its mode/fan control area
+            self._forward_hvac_signal(area)
+        # Still request confirmation; the OP_PRESET_REPORT reply will also
+        # trigger a channel-level poll via _poll_channels().
         await asyncio.sleep(0.1)
         await self.client.request_area_preset(area)
 
@@ -586,12 +702,29 @@ class DynaliteCoordinator:
                      If None, the area's configured fade is used.
                      Pass 0 explicitly for instant switching (e.g. covers).
         """
+        ar = self.areas.get(area)
         if fade_tenths is None:
-            ar = self.areas.get(area)
             fade_tenths = ar.fade_tenths if ar else 0
         LOGGER.debug("[Coordinator] cmd_set_level A%d Ch%d → %d%% fade=%.1fs",
                      area, ch0 + 1, pct, fade_tenths / 10)
         await self.client.set_level(area, ch0, pct, fade_tenths)
+        # Optimistic: update channel state immediately so HA reflects the change
+        # before the OP_LEVEL_REPORT confirmation arrives from the bus.
+        if ar is not None:
+            ch = self._touch_channel(ar, ch0)
+            ch.pct   = pct
+            ch.is_on = pct > 0
+            async_dispatcher_send(self.hass, signal_channel(area, ch0), ch)
+            # Refresh any HVAC climate entity whose mode/fan channel just changed.
+            # Covers both same-area (hvac_mode_area==0) and cross-area configs.
+            for hvac_ar in self.areas.values():
+                eff_mode = hvac_ar.hvac_mode_area or hvac_ar.area
+                eff_fan  = hvac_ar.hvac_fan_area  or hvac_ar.area
+                if (
+                    (hvac_ar.hvac_mode_method == "channel" and eff_mode == area and hvac_ar.hvac_mode_ch0 == ch0) or
+                    (hvac_ar.hvac_fan_method  == "channel" and eff_fan  == area and hvac_ar.hvac_fan_ch0  == ch0)
+                ):
+                    async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
 
     async def async_scan(
         self,
@@ -649,6 +782,16 @@ class DynaliteCoordinator:
         ar = self.areas.get(area)
         fade = ar.fade_tenths if ar else 20
         await self.client.restore_saved_preset(area, fade)
+
+    async def cmd_set_setpoint(self, area: int, temp_c: float) -> None:
+        """Send a setpoint write command to the bus and update local state optimistically."""
+        await self.client.set_setpoint(area, temp_c)
+        ar = self.areas.get(area)
+        if ar:
+            ar.has_setpt = True
+            ar.setpt_c   = temp_c
+            from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+            async_dispatcher_send(self.hass, signal_area(area), ar)
 
     async def cmd_occupancy_enable(self, area: int) -> None:
         await self.client.occupancy_enable(area)

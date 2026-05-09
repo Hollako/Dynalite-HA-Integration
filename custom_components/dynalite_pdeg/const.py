@@ -31,15 +31,19 @@ OP_REQUEST_LEVEL   = 0x61   # Request Channel Level  (outgoing, but echo may arr
 OP_PRESET_REPORT   = 0x62   # Report Current Preset; b[2]=preset(0-origin)
 OP_LEVEL_RESPONSE  = 0x61   # alias — same opcode as request (echo back) kept for compat
 OP_OCCUPANCY       = 0x31   # PIR occupancy;         b[5]=1 occupied/0 vacant
+OP_MOTION_DETECT   = 0x2E   # Motion trigger (instantaneous); b[2]=channel (0xFF=all)
 OP_OCC_DISABLE     = 0x3A   # occupancy detection disabled for area
 OP_OCC_ENABLE      = 0x3B   # occupancy detection enabled  for area
-OP_TEMP_REPORT     = 0xF6   # actual temperature;    b[4]=hi, b[5]=lo (°C × 4 / Q2)
-OP_SETPOINT_REPORT = 0x76   # setpoint temperature;  b[4]=hi, b[5]=lo
+OP_TEMP_REPORT     = 0x4A   # actual temperature;    b[4]=integer °C (signed), b[5]=hundredths
+OP_TEMP_REPORT_ALT = 0xF6   # alternate temp opcode (Q2 format); kept for compat
+OP_SETPOINT_REPORT = 0x76   # setpoint temperature;  b[4]=hi, b[5]=lo (Q2)
+OP_LUX_REPORT      = 0xB8   # ambient light level;   b[6]=lux (physical frame, 0x5C sync)
 
 # ── Outgoing opcodes (integration → bus) ─────────────────────────────────────
 # Select preset: opcode = (preset1 - 1) for presets 1-8 (bank 0)
 #                opcode = 0x08 + (preset1 - 9) for presets 9-16 (bank 1)
 OP_REQUEST_PRESET       = 0x63   # Request Current Preset
+OP_SET_SETPOINT         = 0x48   # Set HVAC setpoint: b[4]=hi, b[5]=lo (°C × 4 / Q2, signed int16)
 OP_FADE_TO_LEVEL        = 0x71   # Ramp Channel to Level: b[2]=ch(0-origin), b[4]=level(0x01=100%,0xFF=0%), b[5]=ramp_rate(100ms steps)
 OP_PROGRAM_CURR_PRESET  = 0x08   # Program Current Preset: save channel levels to active preset
 OP_PROGRAM_DEF_PRESET   = 0x09   # Program Defined Preset: save channel levels to b[2] preset (0-origin)
@@ -85,6 +89,9 @@ def signal_connection() -> str:
 
 def signal_device(device_code: int, box_number: int) -> str:
     return f"{DOMAIN}_device_{device_code}_{box_number}"
+
+def signal_lux(device_code: int, box_number: int) -> str:
+    return f"{DOMAIN}_lux_{device_code}_{box_number}"
 
 # ── Config entry keys ────────────────────────────────────────────────────────
 CONF_HOST       = "host"

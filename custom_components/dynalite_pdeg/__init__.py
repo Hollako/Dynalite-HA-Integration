@@ -52,6 +52,16 @@ async def async_setup_entry(
     async_setup_services(hass)
     async_setup_websocket(hass)
 
+    # ── Remove legacy setpoint sensor entities (setpoint now lives in climate) ──
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    ent_reg = er.async_get(hass)
+    for area_num in coordinator.areas:
+        uid = f"{entry.data[CONF_HOST]}_a{area_num}_setpt"
+        entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, uid)
+        if entity_id:
+            ent_reg.async_remove(entity_id)
+            LOGGER.info("[Cleanup] removed legacy setpoint sensor: %s", entity_id)
+
     # ── Register config panel (full-page table UI) ────────────────────────────
     panel_url = f"dynalite-pdeg-{entry.entry_id[:8]}"
     try:
@@ -79,7 +89,7 @@ async def async_setup_entry(
             sidebar_title=entry.data.get("name", "Dynalite"),
             sidebar_icon="mdi:lightbulb-group",
             frontend_url_path=panel_url,
-            js_url=f"{static_url}/dynalite-config-panel.js?v=13",
+            js_url=f"{static_url}/dynalite-config-panel.js?v=39",
             config={"entry_id": entry.entry_id, "name": entry.data.get("name", "Dynalite PDEG")},
             require_admin=True,
         )

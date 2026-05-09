@@ -25,6 +25,7 @@ from .const import (
     FRAME_LEN,
     LOGGER,
     OP_FADE_TO_LEVEL,
+    OP_SET_SETPOINT,
     OP_PROGRAM_CURR_PRESET,
     OP_PROGRAM_DEF_PRESET,
     OP_RESTORE_SAVED_PRESET,
@@ -156,6 +157,22 @@ class DynaliteClient:
         """
         frame = bytes([SYNC_LOGICAL, area, 0x00, 0x63, 0x00, 0x00, 0xFF, 0x00])
         LOGGER.debug("[TX] request_area_preset A%d", area)
+        await self._send(frame)
+
+    async def set_setpoint(self, area: int, temp_c: float) -> None:
+        """Set the HVAC temperature setpoint for an area.
+
+        DyNet1 opcode 0x48 — Set Setpoint:
+          b[0]=0x1C  b[1]=area  b[2]=0x07  b[3]=0x48
+          b[4]=q_hi  b[5]=q_lo  (signed int16, °C × 4 Q2 format)
+          b[6]=0xFF  b[7]=checksum
+        """
+        import struct  # noqa: PLC0415
+        q = int(round(temp_c * 4.0))
+        q_bytes = struct.pack(">h", q)   # big-endian signed int16
+        frame = bytes([SYNC_LOGICAL, area, 0x07, OP_SET_SETPOINT, q_bytes[0], q_bytes[1], 0xFF, 0x00])
+        LOGGER.debug("[TX] set_setpoint A%d %.2f°C  q=%d  frame: %s",
+                     area, temp_c, q, frame.hex(" ").upper())
         await self._send(frame)
 
     async def program_current_preset(self, area: int) -> None:
