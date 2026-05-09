@@ -222,9 +222,7 @@ class DynaliteConfigPanel extends HTMLElement {
         <!-- Header -->
         <div class="dp-toolbar">
           <div>
-            <h1>Dynalite PDEG - <span id="dp-entry-name"
-                style="font-size:18px;font-weight:400;color:var(--secondary-text-color,#757575);"
-              >${this._entryName || ""}</span></h1>
+            <h1>Dynalite PDEG - <span id="dp-entry-name">${this._entryName || ""}</span></h1>
             <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
               <span id="dp-status" class="dp-badge dp-fail">Connecting…</span>
             </div>

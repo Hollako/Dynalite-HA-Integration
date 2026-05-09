@@ -79,7 +79,7 @@ async def async_setup_entry(
             sidebar_title=entry.data.get("name", "Dynalite"),
             sidebar_icon="mdi:lightbulb-group",
             frontend_url_path=panel_url,
-            js_url=f"{static_url}/dynalite-config-panel.js?v=12",
+            js_url=f"{static_url}/dynalite-config-panel.js?v=13",
             config={"entry_id": entry.entry_id, "name": entry.data.get("name", "Dynalite PDEG")},
             require_admin=True,
         )
