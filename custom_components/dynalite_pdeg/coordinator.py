@@ -109,6 +109,8 @@ class AreaState:
     hvac_fan_map:     dict = field(default_factory=dict)
     # Setpoint step size in °C (0.5 or 1.0)
     setpt_step: float = 0.5
+    # User-defined preset names keyed by 1-based preset number e.g. {1: "Full", 4: "Off"}
+    preset_names: dict = field(default_factory=dict)
     channels: dict[int, ChannelState] = field(default_factory=dict)  # keyed by ch0
 
     def display_name(self) -> str:

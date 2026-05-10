@@ -831,6 +831,7 @@ class DynaliteConfigPanel extends HTMLElement {
         <div class="dp-ch-content" style="display:${areaType === 'light' ? 'block' : 'none'};">
           <div class="dp-ch-list">${chHTML}</div>
           <button class="dp-btn dp-btn-ghost dp-btn-sm dp-ch-add" style="margin-top:8px;">＋ Add Channel</button>
+          <div class="dp-preset-names-wrap"></div>
         </div>
       </td>
       <td style="height:1px;padding:6px 14px;vertical-align:top;">
@@ -873,6 +874,9 @@ class DynaliteConfigPanel extends HTMLElement {
 
     // Populate HVAC config
     this._buildHvacConfig(tr.querySelector(".dp-hvac-config"), ar);
+
+    // Populate preset names editor (light areas)
+    this._buildPresetNamesEditor(tr.querySelector(".dp-preset-names-wrap"), ar);
 
     tr.querySelector(".dp-area-type").addEventListener("change", () => {
       const newType = tr.querySelector(".dp-area-type").value;
@@ -1235,6 +1239,89 @@ class DynaliteConfigPanel extends HTMLElement {
     return wrap;
   }
 
+  // ── Preset names editor ───────────────────────────────────────────────────
+
+  _buildPresetNamesEditor(container, ar) {
+    if (!container) return;
+    container.innerHTML = "";
+
+    const DEFAULT_NAMES = {1: "High", 2: "Medium", 3: "Low", 4: "Off"};
+    const presetNames = ar.preset_names || {};
+    const count = ar.preset_count || 4;
+
+    // ── toggle header ─────────────────────────────────────────────────────────
+    const header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:10px;user-select:none;";
+    header.innerHTML = `
+      <span style="font-size:12px;font-weight:500;color:var(--primary-color,#03a9f4);">🏷 Preset Names</span>
+      <span class="dp-pn-arrow" style="font-size:10px;color:var(--secondary-text-color);">▶</span>`;
+
+    // ── collapsible body ──────────────────────────────────────────────────────
+    const body = document.createElement("div");
+    body.style.cssText = "display:none;margin-top:6px;padding:8px;border-radius:6px;" +
+      "background:var(--secondary-background-color,#f5f5f5);";
+
+    const buildRows = (n) => {
+      body.innerHTML = "";
+      for (let i = 1; i <= n; i++) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:6px;margin-bottom:4px;";
+        const placeholder = DEFAULT_NAMES[i] || `Preset ${i}`;
+        const current = presetNames[String(i)] || presetNames[i] || "";
+        row.innerHTML = `
+          <span style="font-size:12px;min-width:60px;color:var(--secondary-text-color);">Preset ${i}:</span>
+          <input type="text" class="dp-preset-name-inp" data-preset="${i}"
+                 value="${this._esc(current)}" placeholder="${this._esc(placeholder)}"
+                 style="width:150px;font-size:12px;">`;
+        body.appendChild(row);
+      }
+      // save button
+      const foot = document.createElement("div");
+      foot.style.cssText = "display:flex;justify-content:flex-end;margin-top:6px;";
+      foot.innerHTML = `<button class="dp-btn dp-btn-ghost dp-btn-sm dp-preset-names-save">💾 Save Names</button>`;
+      foot.querySelector(".dp-preset-names-save").addEventListener("click", () => {
+        this._savePresetNames(ar.area, body);
+      });
+      body.appendChild(foot);
+    };
+
+    buildRows(count);
+
+    // ── toggle click ──────────────────────────────────────────────────────────
+    let open = false;
+    header.addEventListener("click", () => {
+      open = !open;
+      body.style.display = open ? "block" : "none";
+      header.querySelector(".dp-pn-arrow").textContent = open ? "▼" : "▶";
+    });
+
+    container.appendChild(header);
+    container.appendChild(body);
+  }
+
+  async _savePresetNames(areaNum, body) {
+    const names = {};
+    body.querySelectorAll(".dp-preset-name-inp").forEach(inp => {
+      const preset = inp.dataset.preset;
+      const val    = inp.value.trim();
+      if (val) names[preset] = val;
+    });
+    try {
+      await this._ws("dynalite_pdeg/update_preset_names", {
+        area:         areaNum,
+        preset_names: names,
+      });
+      this._showMsg(`Preset names for Area ${areaNum} saved.`);
+      // Refresh local area state
+      const r = await this._ws("dynalite_pdeg/list_areas");
+      const updated = (r.areas || []).find(a => a.area === areaNum);
+      if (updated) {
+        const idx = this._areas.findIndex(a => a.area === areaNum);
+        if (idx >= 0) this._areas[idx] = updated;
+      }
+    } catch (e) { this._showMsg(e.message, true); }
+  }
+
   // ── Curtain row builder ────────────────────────────────────────────────────
 
   _curtainRow(c) {
@@ -1496,6 +1583,9 @@ class DynaliteConfigPanel extends HTMLElement {
           <div style="font-size:12px;color:var(--secondary-text-color,#757575);">
             ${AREA_TYPE_LABELS[ar.area_type] || ar.area_type} &nbsp;·&nbsp;
             ${ar.channels.length} channel(s) &nbsp;·&nbsp; ${ar.preset_count} presets
+            ${Object.keys(ar.preset_names || {}).length > 0
+              ? `&nbsp;·&nbsp; <span style="color:#43a047;font-weight:500;">🏷 ${Object.keys(ar.preset_names).length} preset name(s)</span>`
+              : ""}
           </div>
         </div>`;
       list.appendChild(item);

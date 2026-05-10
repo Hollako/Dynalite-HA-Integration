@@ -50,6 +50,7 @@ def parse_logical_xml(content: str) -> list[dict]:
         "area_type":    str,           # "light" | "hvac" | "blind"
         "preset_count": int,
         "fade_tenths":  int,           # 2 s default (not in XML)
+        "preset_names": {"1": "Full", "4": "Off", …},   # from <Preset> children
         "channels": [
           {"ch0": int, "name": str, "channel_type": str}
         ]
@@ -74,6 +75,19 @@ def parse_logical_xml(content: str) -> list[dict]:
         category     = area_el.get("category") or "Lighting"
         preset_count = max(1, int(area_el.get("preset_count") or "4"))
         area_type    = _AREA_CATEGORY.get(category, "light")
+
+        # ── Preset names from <Preset id="1" name="Full"> children ──────────────
+        preset_names: dict[str, str] = {}
+        for pr_el in area_el.findall("Preset"):
+            try:
+                pr_id = int(pr_el.get("id", "0"))
+            except ValueError:
+                continue
+            if pr_id <= 0:
+                continue
+            pr_name = (pr_el.get("name") or "").strip()
+            if pr_name:
+                preset_names[str(pr_id)] = pr_name
 
         channels: list[dict] = []
         for ch_el in area_el.findall("Channel"):
@@ -104,6 +118,7 @@ def parse_logical_xml(content: str) -> list[dict]:
             "area_type":    area_type,
             "preset_count": preset_count,
             "fade_tenths":  20,     # 2 s default; XML does not store fade time
+            "preset_names": preset_names,
             "channels":     channels,
         })
 

@@ -41,6 +41,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_import_devices)
     websocket_api.async_register_command(hass, ws_set_lux_sensor)
     websocket_api.async_register_command(hass, ws_request_motion_status)
+    websocket_api.async_register_command(hass, ws_update_preset_names)
     LOGGER.debug("[WS] websocket commands registered")
 
 
@@ -236,6 +237,7 @@ async def ws_list_areas(
             "hvac_fan_ch0":     ar.hvac_fan_ch0,
             "hvac_fan_map":     ar.hvac_fan_map,
             "setpt_step":       ar.setpt_step,
+            "preset_names":     {str(k): v for k, v in ar.preset_names.items()},
             "channels": sorted(
                 [
                     {
@@ -496,6 +498,23 @@ async def ws_update_channel(
     if type_changed:
         # Remove old entity from registry before reload so it doesn't linger
         _remove_channel_entity(hass, coord.host, msg["area"], msg["ch0"], old_type, old_partner)
+
+    # When a cover is configured, the DOWN partner channel must lose its light entity
+    if ch.channel_type == "cover" and ch.cover_partner_ch0 is not None:
+        partner_ch = ar.channels.get(ch.cover_partner_ch0)
+        if partner_ch:
+            _remove_channel_entity(
+                hass, coord.host, msg["area"],
+                ch.cover_partner_ch0,
+                partner_ch.channel_type,
+                partner_ch.cover_partner_ch0,
+            )
+            LOGGER.info(
+                "[WS] removed partner channel entity A%d Ch%d (DOWN relay of cover Ch%d)",
+                msg["area"], ch.cover_partner_ch0, msg["ch0"],
+            )
+
+    if type_changed:
         hass.async_create_task(hass.config_entries.async_reload(msg["entry_id"]))
         connection.send_result(msg["id"], {"ok": True, "reloading": True})
     else:
@@ -1088,6 +1107,20 @@ async def ws_import_logical(
         ar.preset_count = max(1, int(area_dict.get("preset_count") or 4))
         ar.fade_tenths  = max(0, int(area_dict.get("fade_tenths") or 20))
 
+        # Import preset names if the XML (or manual payload) supplies them
+        raw_preset_names = area_dict.get("preset_names") or {}
+        if raw_preset_names:
+            merged: dict[int, str] = dict(ar.preset_names)  # keep existing overrides
+            for k, v in raw_preset_names.items():
+                try:
+                    pnum = int(k)
+                except (ValueError, TypeError):
+                    continue
+                name_str = str(v).strip()
+                if name_str:
+                    merged[pnum] = name_str
+            ar.preset_names = merged
+
         for ch_dict in (area_dict.get("channels") or []):
             try:
                 ch0 = int(ch_dict["ch0"])
@@ -1281,3 +1314,56 @@ async def ws_request_motion_status(
 
     LOGGER.info("[WS] motion status requested for %d D5 Sensor(s): %s", len(box_numbers), box_numbers)
     connection.send_result(msg["id"], {"ok": True, "polled": box_numbers})
+
+
+# ── update_preset_names ────────────────────────────────────────────────────────
+
+@websocket_api.websocket_command({
+    vol.Required("type"):        "dynalite_pdeg/update_preset_names",
+    vol.Required("entry_id"):    str,
+    vol.Required("area"):        vol.All(int, vol.Range(min=1, max=255)),
+    vol.Required("preset_names"): dict,   # {"1": "Full", "2": "Dim", ...}
+})
+@websocket_api.async_response
+async def ws_update_preset_names(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Save user-defined preset names for an area.
+
+    ``preset_names`` is a dict with string keys (1-based preset number) and
+    string values (display name).  Empty string values clear the override.
+    """
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+
+    area_num = msg["area"]
+    ar = coord.areas.get(area_num)
+    if not ar:
+        connection.send_error(msg["id"], "not_found", f"Area {area_num} not found")
+        return
+
+    # Convert string keys → int; drop entries with empty names
+    new_names: dict[int, str] = {}
+    for k, v in msg["preset_names"].items():
+        try:
+            preset_num = int(k)
+        except (ValueError, TypeError):
+            continue
+        name = str(v).strip()
+        if name:
+            new_names[preset_num] = name
+
+    ar.preset_names = new_names
+    coord.schedule_save()
+
+    # Push signal_area so preset-selector entity labels update immediately
+    from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+    from .const import signal_area  # noqa: PLC0415
+    async_dispatcher_send(hass, signal_area(area_num), ar)
+
+    LOGGER.info("[WS] preset names updated for area %d: %s", area_num, new_names)
+    connection.send_result(msg["id"], {"ok": True, "preset_names": {str(k): v for k, v in new_names.items()}})

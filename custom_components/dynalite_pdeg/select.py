@@ -36,7 +36,12 @@ async def async_setup_entry(
 
 
 def _preset_label(preset1: int, ar: AreaState | None) -> str:
-    """Return display name for a 1-based preset."""
+    """Return display name for a 1-based preset.
+
+    Priority: user-defined name (ar.preset_names) → default name → "Preset N".
+    """
+    if ar and ar.preset_names.get(preset1):
+        return ar.preset_names[preset1]
     return _DEFAULT_PRESET_NAMES.get(preset1, f"Preset {preset1}")
 
 

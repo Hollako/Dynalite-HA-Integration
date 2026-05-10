@@ -39,15 +39,24 @@ async def async_setup_entry(
             # control signals managed exclusively by the climate entity.
             if ar.area_type == AREA_TYPE_HVAC:
                 continue
+            # Channels used as the DOWN partner of a cover must not get a light entity
+            cover_partners = {
+                ch.cover_partner_ch0
+                for ch in ar.channels.values()
+                if ch.cover_partner_ch0 is not None
+            }
             for ch in ar.channels.values():
                 key = (ch.area, ch.ch0)
-                if key not in known:
-                    known.add(key)
-                    if ch.channel_type == CHANNEL_TYPE_DIMMER:
-                        new_entities.append(DynaliteDimmableLight(coordinator, ch.area, ch.ch0))
-                    elif ch.channel_type == CHANNEL_TYPE_ONOFF:
-                        new_entities.append(DynaliteOnOffLight(coordinator, ch.area, ch.ch0))
-                    # switch / cover handled by their own platforms
+                if key in known:
+                    continue
+                known.add(key)
+                if ch.ch0 in cover_partners:
+                    continue  # this is the DOWN relay of a cover — no light entity
+                if ch.channel_type == CHANNEL_TYPE_DIMMER:
+                    new_entities.append(DynaliteDimmableLight(coordinator, ch.area, ch.ch0))
+                elif ch.channel_type == CHANNEL_TYPE_ONOFF:
+                    new_entities.append(DynaliteOnOffLight(coordinator, ch.area, ch.ch0))
+                # switch / cover handled by their own platforms
         if new_entities:
             async_add_entities(new_entities)
 
