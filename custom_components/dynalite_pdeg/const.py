@@ -32,12 +32,14 @@ OP_PRESET_REPORT   = 0x62   # Report Current Preset; b[2]=preset(0-origin)
 OP_LEVEL_RESPONSE  = 0x61   # alias — same opcode as request (echo back) kept for compat
 OP_OCCUPANCY       = 0x31   # PIR occupancy;         b[5]=1 occupied/0 vacant
 OP_MOTION_DETECT   = 0x2E   # Motion trigger (instantaneous); b[2]=channel (0xFF=all)
+OP_VACANT          = 0x3E   # Custom vacant signal — area is now unoccupied
 OP_OCC_DISABLE     = 0x3A   # occupancy detection disabled for area
 OP_OCC_ENABLE      = 0x3B   # occupancy detection enabled  for area
 OP_TEMP_REPORT     = 0x4A   # actual temperature;    b[4]=integer °C (signed), b[5]=hundredths
 OP_TEMP_REPORT_ALT = 0xF6   # alternate temp opcode (Q2 format); kept for compat
 OP_SETPOINT_REPORT = 0x76   # setpoint temperature;  b[4]=hi, b[5]=lo (Q2)
-OP_LUX_REPORT      = 0xB8   # ambient light level;   b[6]=lux (physical frame, 0x5C sync)
+OP_LUX_REPORT           = 0xB8   # ambient light level / motion status reply (physical, 0x5C sync)
+OP_PHYSICAL_STATUS_REQ  = 0xB7   # Request Physical Status (physical, 0x5C sync); b[4]=0x0D for motion
 
 # ── Outgoing opcodes (integration → bus) ─────────────────────────────────────
 # Select preset: opcode = (preset1 - 1) for presets 1-8 (bank 0)

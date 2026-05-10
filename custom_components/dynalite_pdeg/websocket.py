@@ -40,6 +40,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_import_logical)
     websocket_api.async_register_command(hass, ws_import_devices)
     websocket_api.async_register_command(hass, ws_set_lux_sensor)
+    websocket_api.async_register_command(hass, ws_request_motion_status)
     LOGGER.debug("[WS] websocket commands registered")
 
 
@@ -711,7 +712,8 @@ async def ws_list_devices(
             "name":        dev.name,
             "online":      online,
             "last_seen_s": age_s,
-            "has_lux":     dev.has_lux,
+            "has_lux":        dev.has_lux,
+            "motion_detected": dev.motion_detected,
         })
 
     connection.send_result(msg["id"], {
@@ -1241,3 +1243,41 @@ async def ws_set_lux_sensor(
                     msg["device_code"], msg["box_number"])
 
     connection.send_result(msg["id"], {"ok": True, "has_lux": dev.has_lux})
+
+
+# ── request_motion_status ──────────────────────────────────────────────────────
+
+@websocket_api.websocket_command({
+    vol.Required("type"):        "dynalite_pdeg/request_motion_status",
+    vol.Required("entry_id"):    str,
+    vol.Required("box_numbers"): [int],   # list of box numbers to poll
+})
+@websocket_api.async_response
+async def ws_request_motion_status(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Send a Request Physical Status (0xB7) to one or more D5 Sensor boxes.
+
+    The device replies with a 0xB8 / b[4]=0x0D frame which the coordinator
+    handles and broadcasts as a dynalite_pdeg_device_motion HA event.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+    if not coord.client.connected:
+        connection.send_error(msg["id"], "not_connected", "PDEG not connected")
+        return
+
+    box_numbers = msg["box_numbers"]
+    for bn in box_numbers:
+        await coord.client.request_motion_status(0xB3, bn)
+        if len(box_numbers) > 1:
+            await _asyncio.sleep(0.05)   # small gap between frames
+
+    LOGGER.info("[WS] motion status requested for %d D5 Sensor(s): %s", len(box_numbers), box_numbers)
+    connection.send_result(msg["id"], {"ok": True, "polled": box_numbers})

@@ -18,6 +18,7 @@ from .const import (
     OP_LEVEL_REPORT,
     OP_LUX_REPORT,
     OP_MOTION_DETECT,
+    OP_VACANT,
     OP_OCC_DISABLE,
     OP_OCC_ENABLE,
     OP_OCCUPANCY,
@@ -123,6 +124,7 @@ class PhysicalDevice:
     name: str = ""          # user-defined custom name (empty = use model default)
     has_lux: bool = False
     lux_value: float | None = None
+    motion_detected: bool | None = None   # None = never seen a motion frame
 
 
 # ── Coordinator ───────────────────────────────────────────────────────────────
@@ -236,17 +238,30 @@ class DynaliteCoordinator:
         area_num = b[1]
         opcode   = b[3]
 
-        if opcode <= 0x07:
+        if opcode <= 0x07 or 0x0A <= opcode <= 0x0D:
             # Select Preset command seen on the bus (from any source — System Builder,
             # wall panel, HA, etc.).
-            # DyNet1 layout: b[3]=opcode (preset within bank 0-7), b[5]=Preset Bank.
-            # b[4] is Fade Time Hi — NOT the bank.
-            preset0 = b[5] * 8 + opcode
-            LOGGER.debug("[A%d] preset select detected → P%d — requesting confirmation",
+            #
+            # DyNet1 supports two preset-per-bank encodings:
+            #   Standard  (8 per bank): opcodes 0x00-0x07, preset_offset = opcode
+            #   Alternate (4 per half): opcodes 0x00-0x03 (presets 1-4)
+            #                       and 0x0A-0x0D (presets 5-8), preset_offset = opcode - 6
+            # b[5] = bank number (0 = presets 1-8, 1 = presets 9-16, …)
+            # b[4] = Fade Time Hi — NOT the bank.
+            if opcode <= 0x07:
+                preset_offset = opcode
+            else:  # 0x0A-0x0D → presets 5-8 within the bank
+                preset_offset = opcode - 6
+            preset0 = b[5] * 8 + preset_offset
+            LOGGER.debug("[A%d] preset select detected → P%d — updating state immediately",
                          area_num, preset0 + 1)
-            # Ask the area to report its active preset; the OP_PRESET_REPORT response
-            # will update ar.preset0 and trigger a channel level poll automatically.
-            await self.client.request_area_preset(area_num)
+            # Update state immediately from the observed frame — don't wait for
+            # OP_PRESET_REPORT confirmation, which may never arrive for passive traffic.
+            ar = self._touch_area(area_num)
+            ar.preset0 = preset0
+            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            self._forward_hvac_signal(area_num)
+            asyncio.ensure_future(self._poll_channels(area_num))
             return
 
         if opcode == 0x71:
@@ -318,17 +333,27 @@ class DynaliteCoordinator:
                     async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
 
         elif opcode == OP_OCCUPANCY:
-            occupied = b[5] == 1
             ar = self._touch_area(area_num)
-            is_new_pir = not ar.has_pir
-            ar.has_pir = True
-            ar.pir_occupied = occupied
-            if is_new_pir:
-                for cb in self.on_new_pir_cbs:
-                    cb()
-                self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
-            LOGGER.debug("[A%d] PIR → %s", area_num, "occupied" if occupied else "vacant")
+            if b[2] == 0xFF:
+                # b[2]=0xFF (All Channels) → occupancy detection control
+                # b[5]=1 Resume (enable), b[5]=0 Suspend (disable)
+                ar.occ_enabled = b[5] == 1
+                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                LOGGER.debug("[A%d] 0x31 occupancy detection %s",
+                             area_num, "resumed" if ar.occ_enabled else "suspended")
+            else:
+                # b[2]=channel → occupancy state report
+                # b[5]=1 occupied, b[5]=0 vacant
+                occupied = b[5] == 1
+                is_new_pir = not ar.has_pir
+                ar.has_pir = True
+                ar.pir_occupied = occupied
+                if is_new_pir:
+                    for cb in self.on_new_pir_cbs:
+                        cb()
+                    self.schedule_save()
+                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                LOGGER.debug("[A%d] 0x31 PIR → %s", area_num, "occupied" if occupied else "vacant")
 
         elif opcode == OP_OCC_ENABLE:
             ar = self._touch_area(area_num)
@@ -356,6 +381,13 @@ class DynaliteCoordinator:
                 self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             LOGGER.debug("[A%d] 0x2E motion trigger  ch=%s", area_num, ch_label)
+
+        elif opcode == OP_VACANT:
+            # Custom vacant signal (0x3E) — area is now unoccupied.
+            ar = self._touch_area(area_num)
+            ar.pir_occupied = False
+            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            LOGGER.debug("[A%d] 0x3E vacant signal received", area_num)
 
         elif opcode == OP_TEMP_REPORT:
             # 0x4A format: b[4] = integer °C (signed byte), b[5] = hundredths.
@@ -401,8 +433,7 @@ class DynaliteCoordinator:
             self._handle_signon_reply(device_code, box_number, b)
             return
 
-        if opcode == OP_LUX_REPORT:  # 0xB8 — ambient light level
-            # RX: 5C [dc] [bn] 0xB8 [01] [00] [lux] [cs]
+        if opcode == OP_LUX_REPORT:  # 0xB8 — "Reply Present Physical State"
             # Register device if first time seen
             if key not in self.devices:
                 model = DEVICE_NAMES.get(device_code, f"Device 0x{device_code:02X}")
@@ -412,21 +443,36 @@ class DynaliteCoordinator:
                     cb()
                 self.schedule_save()
             dev = self.devices[key]
-            # b[5] = high byte (each unit = 256 lux), b[6] = low byte (1–255 lux)
-            lux = b[5] * 256 + b[6]
-            dev.lux_value = float(lux)
-            # Auto-enable the lux sensor the first time a reading arrives,
-            # but only for D5 Sensor (0xB3) — the only device that sends lux.
-            if not dev.has_lux and device_code == 0xB3:
-                dev.has_lux = True
-                for cb in self.on_new_lux_cbs:
-                    cb()
-                self.schedule_save()
-                LOGGER.info("[Device 0x%02X box %d] lux sensor auto-enabled (%d lx)",
-                            device_code, box_number, lux)
-            async_dispatcher_send(self.hass, signal_lux(device_code, box_number))
-            LOGGER.debug("[Device 0x%02X box %d] lux = %d lx (hi=%d lo=%d)",
-                         device_code, box_number, lux, b[5], b[6])
+
+            if b[4] == 0x0D:
+                # Motion sub-type: b[5]/b[6] = 0xFF/0xFF detected, 0x00/0x00 vacant
+                detected = b[5] == 0xFF and b[6] == 0xFF
+                dev.motion_detected = detected
+                self.hass.bus.fire(
+                    f"{DOMAIN}_device_motion",
+                    {
+                        "device_code": device_code,
+                        "box_number":  box_number,
+                        "motion":      detected,
+                    },
+                )
+                LOGGER.debug("[Device 0x%02X box %d] motion → %s",
+                             device_code, box_number, "detected" if detected else "vacant")
+            else:
+                # Lux sub-type: b[5] = high byte (256 lux/unit), b[6] = low byte
+                lux = b[5] * 256 + b[6]
+                dev.lux_value = float(lux)
+                # Auto-enable the lux sensor the first time a reading arrives (D5 Sensor only)
+                if not dev.has_lux and device_code == 0xB3:
+                    dev.has_lux = True
+                    for cb in self.on_new_lux_cbs:
+                        cb()
+                    self.schedule_save()
+                    LOGGER.info("[Device 0x%02X box %d] lux sensor auto-enabled (%d lx)",
+                                device_code, box_number, lux)
+                async_dispatcher_send(self.hass, signal_lux(device_code, box_number))
+                LOGGER.debug("[Device 0x%02X box %d] lux = %d lx (hi=%d lo=%d)",
+                             device_code, box_number, lux, b[5], b[6])
             return
 
         # Any other physical frame — register device if new, no online update

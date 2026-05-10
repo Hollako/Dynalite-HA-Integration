@@ -64,6 +64,27 @@ class DynaliteConfigPanel extends HTMLElement {
     this._bindLogicalStaticEvents();
     this._bindXmlImportEvents();
     this._reload();
+    this._subscribeMotion();
+  }
+
+  _subscribeMotion() {
+    if (!this._hass || !this._hass.connection) return;
+    this._hass.connection.subscribeEvents((event) => {
+      const { device_code, box_number, motion } = event.data || {};
+      // Find the card for this device and update its motion badge live
+      const cards = this.querySelectorAll(".dp-device-card");
+      cards.forEach(card => {
+        const dc  = parseInt(card.dataset.deviceCode, 10);
+        const bn  = parseInt(card.dataset.boxNumber,  10);
+        if (dc === device_code && bn === box_number) {
+          const badge = card.querySelector(".dp-dev-motion-badge");
+          if (badge) {
+            badge.style.background = motion ? "#e53935" : "#9e9e9e";
+            badge.textContent = `🚶 ${motion ? "Motion" : "Clear"}`;
+          }
+        }
+      });
+    }, "dynalite_pdeg_device_motion");
   }
 
   _skeleton() {
@@ -336,6 +357,16 @@ class DynaliteConfigPanel extends HTMLElement {
               </div>
             </div>
           </div>
+          <!-- D5 Sensor Motion Status Poll -->
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;
+                      padding:10px 14px;border-radius:6px;flex-wrap:wrap;
+                      background:var(--secondary-background-color,#f5f5f5);">
+            <span style="font-size:13px;font-weight:500;">🚶 Poll Motion Status:</span>
+            <input type="text" id="dp-motion-poll-boxes"
+                   placeholder="Box numbers e.g. 20, 21, 22  (blank = all D5 Sensors)"
+                   style="flex:1;min-width:220px;font-size:13px;">
+            <button class="dp-btn dp-btn-ghost dp-btn-sm" id="dp-motion-poll-btn">Poll</button>
+          </div>
           <div id="dp-device-grid" class="dp-device-grid"></div>
         </div>
 
@@ -428,6 +459,35 @@ class DynaliteConfigPanel extends HTMLElement {
         })
         .catch(e => this._showMsg("Sign-on failed: " + e.message, true))
         .finally(() => { btn.disabled = false; btn.textContent = "📡 Send Sign-on"; });
+    });
+
+    this.querySelector("#dp-motion-poll-btn").addEventListener("click", () => {
+      const inp = this.querySelector("#dp-motion-poll-boxes");
+      const raw = inp.value.trim();
+      let boxNumbers;
+      if (raw === "") {
+        // Blank → poll all known D5 Sensors (0xB3)
+        boxNumbers = this._devices
+          .filter(d => d.device_code === 0xB3)
+          .map(d => d.box_number);
+        if (boxNumbers.length === 0) {
+          this._showMsg("No D5 Sensors found in device list.", true);
+          return;
+        }
+      } else {
+        boxNumbers = raw.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+        if (boxNumbers.length === 0) {
+          this._showMsg("Enter valid box numbers (comma-separated).", true);
+          return;
+        }
+      }
+      const btn = this.querySelector("#dp-motion-poll-btn");
+      btn.disabled = true;
+      btn.textContent = "Polling…";
+      this._ws("dynalite_pdeg/request_motion_status", { box_numbers: boxNumbers })
+        .then(() => this._showMsg(`Motion status requested for box(es): ${boxNumbers.join(", ")}`))
+        .catch(e => this._showMsg("Poll failed: " + e.message, true))
+        .finally(() => { btn.disabled = false; btn.textContent = "Poll"; });
     });
 
     this.querySelector("#dp-signon-interval-save").addEventListener("click", () => {
@@ -579,6 +639,8 @@ class DynaliteConfigPanel extends HTMLElement {
     const dotClass  = dev.online ? "dp-dot-on" : "dp-dot-off";
 
     card.style.position = "relative";
+    card.dataset.deviceCode = dev.device_code;
+    card.dataset.boxNumber  = dev.box_number;
     card.innerHTML = `
       <button class="dp-btn dp-btn-danger dp-btn-sm dp-dev-del" title="Delete this device"
               style="position:absolute;top:14px;right:16px;">✕</button>
@@ -595,11 +657,19 @@ class DynaliteConfigPanel extends HTMLElement {
           <br>${lastSeenTxt}
         </div>
         ${dev.device_code === 0xB3 ? `
-        <button class="dp-btn dp-btn-sm dp-dev-lux" style="flex-shrink:0;
-                background:${dev.has_lux ? "#43a047" : "#9e9e9e"};color:#fff;"
-                title="${dev.has_lux ? "Lux sensor enabled — click to disable" : "Click to enable illuminance sensor"}">
-          💡 Lux${dev.has_lux ? " ✓" : ""}
-        </button>` : ""}
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;">
+          <button class="dp-btn dp-btn-sm dp-dev-lux" style="
+                  background:${dev.has_lux ? "#43a047" : "#9e9e9e"};color:#fff;"
+                  title="${dev.has_lux ? "Lux sensor enabled — click to disable" : "Click to enable illuminance sensor"}">
+            💡 Lux${dev.has_lux ? " ✓" : ""}
+          </button>
+          <span class="dp-dev-motion-badge" style="
+                font-size:11px;font-weight:600;padding:2px 7px;border-radius:10px;
+                background:${dev.motion_detected === true ? "#e53935" : dev.motion_detected === false ? "#9e9e9e" : "#bdbdbd"};
+                color:#fff;">
+            🚶 ${dev.motion_detected === true ? "Motion" : dev.motion_detected === false ? "Clear" : "—"}
+          </span>
+        </div>` : ""}
       </div>
       <div class="dp-device-rename-row">
         <input type="text" class="dp-device-rename-inp"

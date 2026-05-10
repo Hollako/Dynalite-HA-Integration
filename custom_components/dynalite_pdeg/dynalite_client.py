@@ -87,19 +87,26 @@ class DynaliteClient:
     ) -> None:
         """Select a preset (1-based) on an area with optional fade (0.1 s units).
 
-        DyNet1 frame layout (opcodes 0x00-0x07):
+        DyNet1 supports two preset-per-bank encodings:
+          Standard  (8 per bank): opcodes 0x00-0x07 for presets 1-8 within the bank.
+          Alternate (4 per half): opcodes 0x00-0x03 for presets 1-4,
+                                  opcodes 0x0A-0x0D for presets 5-8 within the bank.
+        We use the alternate encoding (matches observed bus traffic on 4-preset systems).
+
           b[0] = 0x1C  sync
           b[1] = area
           b[2] = Fade Time Low  (0.02 s units — fade_tenths × 5)
-          b[3] = opcode = (preset - 1) % 8  → 0x00 = first in bank, 0x07 = last
+          b[3] = opcode  (see encoding above)
           b[4] = Fade Time High (MSB of 16-bit fade; 0x00 for fades ≤ 5.1 s)
           b[5] = Preset Bank    = (preset - 1) // 8  → 0x00 for P1-8, 0x01 for P9-16, …
           b[6] = 0xFF  (join = broadcast)
           b[7] = checksum
         """
-        p0      = preset1 - 1
-        opcode  = p0 % 8                       # 0x00-0x07 (preset within bank)
-        bank    = p0 // 8                      # 0x00=P1-8, 0x01=P9-16, 0x02=P17-24 …
+        p0             = preset1 - 1
+        bank           = p0 // 8               # 0x00=P1-8, 0x01=P9-16, …
+        offset         = p0 % 8                # 0-7 within the bank
+        # Alternate encoding: offsets 4-7 (presets 5-8) use opcodes 0x0A-0x0D
+        opcode         = offset if offset <= 3 else offset + 6
         steps   = fade_tenths * 5              # 0.1 s → 0.02 s units (×5)
         fade_lo = steps & 0xFF
         fade_hi = (steps >> 8) & 0xFF
@@ -139,15 +146,23 @@ class DynaliteClient:
         await self._send(frame)
 
     async def occupancy_enable(self, area: int) -> None:
-        """Enable occupancy detection for an area (0x3B)."""
-        frame = bytes([SYNC_LOGICAL, area, 0x00, 0x3B, 0x00, 0x00, 0xFF, 0x00])
-        LOGGER.debug("[TX] occupancy_enable A%d  frame: %s", area, frame.hex(" ").upper())
+        """Resume occupancy detection for an area.
+
+        DyNet1 opcode 0x31, b[2]=0xFF (all channels), b[5]=0x01 (resume).
+        Frame: 1C [area] FF 31 00 01 FF [cs]
+        """
+        frame = bytes([SYNC_LOGICAL, area, 0xFF, 0x31, 0x00, 0x01, 0xFF, 0x00])
+        LOGGER.debug("[TX] occupancy_enable (resume) A%d  frame: %s", area, frame.hex(" ").upper())
         await self._send(frame)
 
     async def occupancy_disable(self, area: int) -> None:
-        """Disable occupancy detection for an area (0x3A)."""
-        frame = bytes([SYNC_LOGICAL, area, 0x00, 0x3A, 0x00, 0x00, 0xFF, 0x00])
-        LOGGER.debug("[TX] occupancy_disable A%d  frame: %s", area, frame.hex(" ").upper())
+        """Suspend occupancy detection for an area.
+
+        DyNet1 opcode 0x31, b[2]=0xFF (all channels), b[5]=0x00 (suspend).
+        Frame: 1C [area] FF 31 00 00 FF [cs]
+        """
+        frame = bytes([SYNC_LOGICAL, area, 0xFF, 0x31, 0x00, 0x00, 0xFF, 0x00])
+        LOGGER.debug("[TX] occupancy_disable (suspend) A%d  frame: %s", area, frame.hex(" ").upper())
         await self._send(frame)
 
     async def request_area_preset(self, area: int) -> None:
@@ -208,6 +223,20 @@ class DynaliteClient:
         fade_hi  = (steps >> 8) & 0xFF
         frame = bytes([SYNC_LOGICAL, area, fade_lo, OP_RESTORE_SAVED_PRESET, fade_hi, 0x00, 0xFF, 0x00])
         LOGGER.info("[TX] restore_saved_preset A%d fade=%ds", area, fade_tenths / 10)
+        await self._send(frame)
+
+    async def request_motion_status(self, device_code: int, box_number: int) -> None:
+        """Request current motion status from a physical device (opcode 0xB7, sub 0x0D).
+
+        DyNet1 physical frame:
+          b[0]=0x5C  b[1]=device_code  b[2]=box_number  b[3]=0xB7
+          b[4]=0x0D  b[5]=0x00  b[6]=0x00  b[7]=checksum
+
+        The device replies with a 0x5C opcode 0xB8 b[4]=0x0D frame:
+          b[5]/b[6]=0xFF/0xFF → motion detected, 0x00/0x00 → vacant.
+        """
+        frame = bytes([SYNC_PHYSICAL, device_code, box_number, 0xB7, 0x0D, 0x00, 0x00, 0x00])
+        LOGGER.debug("[TX] request_motion_status  dc=0x%02X box=%d", device_code, box_number)
         await self._send(frame)
 
     async def request_device_signon(self, device_code: int, box_number: int) -> None:
