@@ -8,7 +8,7 @@ A custom Home Assistant integration for **Philips Dynalite** lighting control sy
 
 - Home Assistant 2024.1 or later
 - Philips Dynalite PDEG (Ethernet Gateway) on your network
-- HA must be able to reach the PDEG on TCP port 50000
+- HA must be able to reach the PDEG thourgh a Dynet1 Port TCP port e.g. 50001
 
 ---
 
