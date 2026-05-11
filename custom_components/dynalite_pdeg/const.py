@@ -29,6 +29,7 @@ OP_SIGNON_REPLY_AC = 0x81   # b[2] of RX 0xAC frame — Reply Device Signon (Sys
 OP_LEVEL_REPORT    = 0x60   # Report Channel Level;  b[2]=ch(0-origin), b[4]=target level, b[5]=current level
 OP_REQUEST_LEVEL   = 0x61   # Request Channel Level  (outgoing, but echo may arrive as 0x61)
 OP_PRESET_REPORT   = 0x62   # Report Current Preset; b[2]=preset(0-origin)
+OP_FADE_CH_PRESET  = 0x6B   # Fade Channel/Area to Preset; b[2]=ch(0-origin), b[4]=preset0, b[5]=fade
 OP_LEVEL_RESPONSE  = 0x61   # alias — same opcode as request (echo back) kept for compat
 OP_OCCUPANCY       = 0x31   # PIR occupancy;         b[5]=1 occupied/0 vacant
 OP_MOTION_DETECT   = 0x2E   # Motion trigger (instantaneous); b[2]=channel (0xFF=all)

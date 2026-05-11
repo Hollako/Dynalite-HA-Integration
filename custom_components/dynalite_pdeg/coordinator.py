@@ -162,6 +162,11 @@ class DynaliteCoordinator:
         # Storage — injected by __init__.py after construction
         self._storage = None
         self._save_task: asyncio.Task | None = None
+        # Protection map: (area, ch0) → monotonic expiry time.
+        # After a 0x6B optimistic update we block all 0x60 level reports for that
+        # channel for a few seconds so bus poll responses can't overwrite the
+        # optimistic state we just pushed.
+        self._ch_protected: dict[tuple[int, int], float] = {}
         self.client = DynaliteClient(
             host, port,
             self._on_frame,
@@ -206,6 +211,15 @@ class DynaliteCoordinator:
     async def _on_connection(self, connected: bool) -> None:
         self.connected = connected
         LOGGER.info("[Coordinator] connection: %s", "UP" if connected else "DOWN")
+        if connected:
+            # Reset transient occupancy state on every (re)connect so motion
+            # sensors always start as "clear" after a restart.  The bus will
+            # re-report genuine occupancy within seconds via opcode 0x31/0x2E.
+            # Without this reset, a stale "occupied" broadcast from a controller
+            # that replays its last state on reconnect would leave the sensor
+            # permanently stuck as occupied until the next vacancy event.
+            for ar in self.areas.values():
+                ar.pir_occupied = False
         async_dispatcher_send(self.hass, signal_connection(), connected)
         if connected:
             # Poll all known devices immediately on (re)connect
@@ -278,6 +292,65 @@ class DynaliteCoordinator:
                 asyncio.ensure_future(self._poll_single_channel(area_num, ch_raw))
             return
 
+        if opcode == 0x6B:
+            # "Fade Channel/Area to Preset" command seen on the bus.
+            # Frame layout:
+            #   b[2] = channel (0-based)  — which channel is being moved (0xFF = all)
+            #   b[4] = preset0 (0-based)  — target preset
+            #   b[5] = fade time (in 20 ms steps)
+            #
+            # Virtual channels (no physical hardware) never respond to level polls,
+            # so we derive their new state directly from the preset name:
+            #   - preset named "Off" (or blank/last-resort fallback) → is_on=False, pct=0
+            #   - any other preset                                    → is_on=True,  pct=100
+            # For physical channels we also schedule a full poll as a fallback so the
+            # actual dimmer level is reflected rather than the 100/0 approximation.
+            _DEFAULT_PRESET_NAMES = {1: "High", 2: "Medium", 3: "Low", 4: "Off"}
+            ch_raw  = b[2]
+            preset0 = b[4]
+            ar      = self._touch_area(area_num)
+            ar.preset0 = preset0
+
+            preset1      = preset0 + 1
+            preset_label = (ar.preset_names.get(preset1)
+                            or _DEFAULT_PRESET_NAMES.get(preset1, ""))
+            is_off       = preset_label.strip().lower() == "off"
+
+            LOGGER.debug(
+                "[A%d] 0x6B fade-ch-to-preset: Ch%s → P%d ('%s') is_off=%s",
+                area_num,
+                ch_raw + 1 if ch_raw != 0xFF else "ALL",
+                preset1, preset_label, is_off,
+            )
+
+            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            self._forward_hvac_signal(area_num)
+
+            # ── Direct optimistic update for the named channel ────────────────
+            _protect_until = time.monotonic() + 5.0   # block stale poll replies
+            if ch_raw != 0xFF:
+                ch       = self._touch_channel(ar, ch_raw)
+                ch.pct   = 0 if is_off else 100
+                ch.is_on = not is_off
+                async_dispatcher_send(self.hass, signal_channel(area_num, ch_raw), ch)
+                self._ch_protected[(area_num, ch_raw)] = _protect_until
+            else:
+                # Broadcast (all channels in area) — update all known channels
+                for ch in ar.channels.values():
+                    ch.pct   = 0 if is_off else 100
+                    ch.is_on = not is_off
+                    async_dispatcher_send(self.hass, signal_channel(area_num, ch.ch0), ch)
+                    self._ch_protected[(area_num, ch.ch0)] = _protect_until
+
+            # ── No poll here ─────────────────────────────────────────────────
+            # Virtual channels never respond to level polls, so polling only
+            # introduces spurious responses that corrupt the state we just set.
+            # Physical channels will get polled anyway when the 0x62 preset-report
+            # that follows a 0x6B arrives and triggers _poll_channels below.
+            # The _ch_protected timestamps above ensure that even if poll replies
+            # arrive within 5 s they cannot overwrite the optimistic state.
+            return
+
         if 0x80 <= opcode <= 0x83:
             # "Set Logical Channel Level" command family (opcodes 0x80–0x83).
             # Frame layout:
@@ -319,6 +392,24 @@ class DynaliteCoordinator:
             pct   = dynalite_to_pct(level)
             ar    = self._touch_area(area_num)
             ch    = self._touch_channel(ar, ch0)
+
+            # Ignore poll responses that arrive within the 5-second protection
+            # window set by the 0x6B optimistic-update handler.  Virtual channels
+            # (no physical hardware) sometimes emit spurious level=0x00 frames
+            # (maps to 100%) in response to a level poll, which would otherwise
+            # overwrite the correct state we just pushed.
+            _expiry = self._ch_protected.get((area_num, ch0))
+            if _expiry is not None:
+                if time.monotonic() < _expiry:
+                    LOGGER.debug(
+                        "[A%d Ch%d] level report blocked — protected for %.1fs more"
+                        " (incoming level=0x%02X → %d%%)",
+                        area_num, ch0 + 1, _expiry - time.monotonic(), level, pct,
+                    )
+                    return
+                # Protection expired — remove entry and fall through to normal update
+                del self._ch_protected[(area_num, ch0)]
+
             ch.pct   = pct
             ch.is_on = pct > 0
             async_dispatcher_send(self.hass, signal_channel(area_num, ch0), ch)
@@ -729,15 +820,34 @@ class DynaliteCoordinator:
         target level (b[4]) so results are valid even mid-fade — no need to wait
         for the fade to complete.  A short 0.2 s settle lets the bus process the
         preset command before we start asking for levels.
+
+        Channels that are currently protected (recently updated by a 0x6B
+        optimistic command) are skipped — their state is already correct and
+        polling them would only generate spurious bus traffic from virtual
+        channels (which have no physical hardware to reply with a real level).
         """
         await asyncio.sleep(0.2)
         ar = self.areas.get(area)
         if not ar or not ar.channels:
             return
+        now = time.monotonic()
+        to_poll = [
+            ch0 for ch0 in sorted(ar.channels)
+            if self._ch_protected.get((area, ch0), 0.0) <= now
+        ]
+        if not to_poll:
+            LOGGER.debug(
+                "[Coordinator] poll skipped: A%d — all %d channel(s) protected",
+                area, len(ar.channels),
+            )
+            return
+        skipped = len(ar.channels) - len(to_poll)
         LOGGER.debug(
-            "[Coordinator] polling channels: A%d (%d channels)", area, len(ar.channels)
+            "[Coordinator] polling channels: A%d (%d channels%s)",
+            area, len(to_poll),
+            f", {skipped} protected/skipped" if skipped else "",
         )
-        for ch0 in sorted(ar.channels):
+        for ch0 in to_poll:
             if self.client.connected:
                 await self.client.request_level(area, ch0)
                 await asyncio.sleep(0.05)

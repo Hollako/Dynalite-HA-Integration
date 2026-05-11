@@ -35,6 +35,7 @@ class DynaliteConfigPanel extends HTMLElement {
     this._devices        = [];
     this._connected      = false;
     this._ready          = false;
+    this._narrow         = false;
     this._activeTab      = "physical";  // "physical" | "logical"
     this._signonInterval      = 3600;   // local copy; loaded from backend
     this._xmlLogicalAreas     = [];     // parsed logical XML areas (for preview)
@@ -43,7 +44,19 @@ class DynaliteConfigPanel extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    // Keep ha-menu-button in sync so it can show/hide correctly
+    const btn = this.querySelector("#dp-menu-btn");
+    if (btn) { btn.hass = hass; btn.narrow = this._narrow; }
     if (!this._ready) { this._ready = true; this._init(); }
+  }
+
+  // HA sets this to true when the viewport is narrow OR when the sidebar is
+  // configured as "always hidden" — the ha-menu-button uses it to decide
+  // whether to render the hamburger icon.
+  set narrow(narrow) {
+    this._narrow = narrow;
+    const btn = this.querySelector("#dp-menu-btn");
+    if (btn) { btn.narrow = narrow; if (this._hass) btn.hass = this._hass; }
   }
 
   set panel(panel) {
@@ -51,6 +64,8 @@ class DynaliteConfigPanel extends HTMLElement {
     this._entryName = (panel && panel.config && panel.config.name)     || "";
     const el = this.querySelector("#dp-entry-name");
     if (el) el.textContent = this._entryName;
+    const title = this.querySelector("#dp-appbar-title");
+    if (title) title.textContent = `Dynalite PDEG${this._entryName ? " — " + this._entryName : ""}`;
   }
 
   // ── Setup ──────────────────────────────────────────────────────────────────
@@ -60,6 +75,9 @@ class DynaliteConfigPanel extends HTMLElement {
     this.style.padding    = "0";
     this.style.fontFamily = "Roboto, sans-serif";
     this.innerHTML = this._skeleton();
+    // Wire ha-menu-button now that the DOM exists
+    const btn = this.querySelector("#dp-menu-btn");
+    if (btn) { btn.hass = this._hass; btn.narrow = this._narrow; }
     this._bindTabEvents();
     this._bindLogicalStaticEvents();
     this._bindXmlImportEvents();
@@ -79,7 +97,7 @@ class DynaliteConfigPanel extends HTMLElement {
         if (dc === device_code && bn === box_number) {
           const badge = card.querySelector(".dp-dev-motion-badge");
           if (badge) {
-            badge.style.background = motion ? "#e53935" : "#9e9e9e";
+            badge.style.background = motion ? "#43a047" : "#9e9e9e";
             badge.textContent = `🚶 ${motion ? "Motion" : "Clear"}`;
           }
         }
@@ -90,6 +108,20 @@ class DynaliteConfigPanel extends HTMLElement {
   _skeleton() {
     return `
       <style>
+        /* ── App bar (sidebar toggle when sidebar is hidden) ── */
+        #dp-app-bar {
+          position: sticky; top: 0; z-index: 10;
+          display: flex; align-items: center;
+          height: 48px; padding-right: 16px;
+          background: var(--app-header-background-color, var(--primary-color, #03a9f4));
+          color: var(--app-header-text-color, #fff);
+          box-shadow: 0 2px 4px rgba(0,0,0,.24);
+        }
+        #dp-app-bar span {
+          font-size: 16px; font-weight: 400; letter-spacing: .005em;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
         #dp-root { padding: 24px; color: var(--primary-text-color, #212121); }
         #dp-root h1 { font-size: 24px; font-weight: 400; margin: 0 0 4px; }
 
@@ -259,6 +291,12 @@ class DynaliteConfigPanel extends HTMLElement {
         #dp-toast.dp-msg-ok  { background: #e8f5e9; color: #2e7d32; }
         #dp-toast.dp-msg-err { background: #ffebee; color: #b71c1c; }
       </style>
+
+      <!-- Sticky top bar — provides the hamburger button when the sidebar is hidden -->
+      <div id="dp-app-bar">
+        <ha-menu-button id="dp-menu-btn"></ha-menu-button>
+        <span id="dp-appbar-title">Dynalite PDEG</span>
+      </div>
 
       <div id="dp-root">
         <!-- Header -->
@@ -665,7 +703,7 @@ class DynaliteConfigPanel extends HTMLElement {
           </button>
           <span class="dp-dev-motion-badge" style="
                 font-size:11px;font-weight:600;padding:2px 7px;border-radius:10px;
-                background:${dev.motion_detected === true ? "#e53935" : dev.motion_detected === false ? "#9e9e9e" : "#bdbdbd"};
+                background:${dev.motion_detected === true ? "#43a047" : dev.motion_detected === false ? "#9e9e9e" : "#bdbdbd"};
                 color:#fff;">
             🚶 ${dev.motion_detected === true ? "Motion" : dev.motion_detected === false ? "Clear" : "—"}
           </span>
