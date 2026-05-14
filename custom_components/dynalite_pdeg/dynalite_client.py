@@ -322,8 +322,8 @@ class DynaliteClient:
                 if sock:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                     if hasattr(socket, "TCP_KEEPIDLE"):   # Linux
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE,  60)
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE,  10)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL,  5)
                         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT,    3)
                 LOGGER.info("[PDEG] connected")
                 await self._conn_cb(True)
