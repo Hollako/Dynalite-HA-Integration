@@ -18,6 +18,7 @@ Frame layout (logical / 0x1C):
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -312,6 +313,18 @@ class DynaliteClient:
                     asyncio.open_connection(self._host, self._port),
                     timeout=10,
                 )
+                # Enable TCP keepalive so the OS detects a silent dead connection
+                # without us needing an application-level read timeout (which would
+                # cause false reconnects when the bus is simply quiet).
+                # Probes start after 60 s idle, sent every 10 s, 3 attempts →
+                # dead connection detected within ~90 s of going silent.
+                sock = self._writer.get_extra_info("socket")
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    if hasattr(socket, "TCP_KEEPIDLE"):   # Linux
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE,  60)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT,    3)
                 LOGGER.info("[PDEG] connected")
                 await self._conn_cb(True)
                 await self._read_loop()

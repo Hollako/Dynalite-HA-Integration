@@ -222,23 +222,60 @@ class DynaliteCoordinator:
                 ar.pir_occupied = False
         async_dispatcher_send(self.hass, signal_connection(), connected)
         if connected:
-            # Poll all known devices immediately on (re)connect
-            if self.devices:
-                asyncio.ensure_future(self._poll_all_devices())
-            if self.areas:
-                # Re-poll all known areas/channels to refresh state
-                for area_num in list(self.areas):
-                    await self.client.request_area_preset(area_num)
+            asyncio.ensure_future(self._reconnect_sequence())
+
+    async def _reconnect_sequence(self) -> None:
+        """Ordered bus refresh after every (re)connect.
+
+        Runs in a background task so _on_connection returns immediately.
+        Sequence:
+          1. Short settle delay   — let the bus stabilise after TCP reconnect
+          2. Sign-on poll         — verify which physical devices are online
+          3. Preset + level poll  — refresh all area/channel state in HA
+        Each phase is separated by a small inter-phase gap so the bus is never
+        flooded with back-to-back requests from multiple phases at once.
+        """
+        # ── 1. Settle ─────────────────────────────────────────────────────────
+        LOGGER.info("[Coordinator] reconnect sequence: settling for 1 s …")
+        await asyncio.sleep(1)
+
+        if not self.client.connected:
+            return
+
+        # ── 2. Sign-on poll ───────────────────────────────────────────────────
+        if self.devices:
+            LOGGER.info(
+                "[Coordinator] reconnect sequence: sign-on poll (%d device(s)) …",
+                len(self.devices),
+            )
+            await self._poll_all_devices()
+            # Small gap between sign-on traffic and the level poll burst
+            await asyncio.sleep(0.5)
+
+        if not self.client.connected:
+            return
+
+        # ── 3. Preset + channel level refresh ─────────────────────────────────
+        if self.areas:
+            LOGGER.info(
+                "[Coordinator] reconnect sequence: refreshing %d area(s) …",
+                len(self.areas),
+            )
+            for area_num in list(self.areas):
+                if not self.client.connected:
+                    return
+                await self.client.request_area_preset(area_num)
+                await asyncio.sleep(0.05)
+                for ch0 in list(self.areas[area_num].channels):
+                    if not self.client.connected:
+                        return
+                    await self.client.request_level(area_num, ch0)
                     await asyncio.sleep(0.05)
-                    for ch0 in list(self.areas[area_num].channels):
-                        await self.client.request_level(area_num, ch0)
-                        await asyncio.sleep(0.05)
-            else:
-                # No stored entities — run an initial auto-scan (areas 1-20, 8 ch each)
-                LOGGER.info("[Coordinator] no saved entities — running initial scan")
-                asyncio.ensure_future(
-                    self.async_scan(area_min=2, area_max=20, channel_count=8, delay_ms=50)
-                )
+            LOGGER.info("[Coordinator] reconnect sequence complete.")
+        else:
+            # No stored entities — run an initial auto-scan
+            LOGGER.info("[Coordinator] no saved entities — running initial scan")
+            await self.async_scan(area_min=2, area_max=20, channel_count=8, delay_ms=50)
 
     # ── Frame dispatch ────────────────────────────────────────────────────────
 
