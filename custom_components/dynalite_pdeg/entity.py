@@ -7,7 +7,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 
-from .const import DOMAIN, signal_connection
+from .const import DOMAIN, signal_channel_remove, signal_connection
 from .coordinator import DynaliteCoordinator
 
 
@@ -108,6 +108,17 @@ class DynaliteChannelEntity(DynaliteEntity):
                 self._on_channel_update,
             )
         )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_channel_remove(self._area, self._ch0),
+                self._on_channel_remove,
+            )
+        )
+
+    @callback
+    def _on_channel_remove(self) -> None:
+        self.hass.async_create_task(self.async_remove(force_remove=True))
 
     @callback
     def _on_channel_update(self, ch) -> None:

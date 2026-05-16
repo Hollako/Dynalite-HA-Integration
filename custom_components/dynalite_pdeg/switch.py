@@ -55,8 +55,12 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
+    def _forget_channel_switch(area: int, ch0: int) -> None:
+        known_ch.discard((area, ch0))
+
     _add_channel_switches()
     coordinator.on_new_channel_cbs.append(_add_channel_switches)
+    coordinator.on_channel_type_change_cbs.append(_forget_channel_switch)
 
 
 # ── Occupancy enable/disable switch ───────────────────────────────────────────

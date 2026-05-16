@@ -96,6 +96,12 @@ def signal_device(device_code: int, box_number: int) -> str:
 def signal_lux(device_code: int, box_number: int) -> str:
     return f"{DOMAIN}_lux_{device_code}_{box_number}"
 
+def signal_channel_remove(area: int, ch0: int) -> str:
+    return f"{DOMAIN}_ch_remove_{area}_{ch0}"
+
+def signal_device_motion(device_code: int, box_number: int) -> str:
+    return f"{DOMAIN}_device_motion_{device_code}_{box_number}"
+
 # ── Config entry keys ────────────────────────────────────────────────────────
 CONF_HOST       = "host"
 CONF_PORT       = "port"

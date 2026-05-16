@@ -60,12 +60,14 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
+    def _forget_channel(area: int, ch0: int) -> None:
+        known.discard((area, ch0))
+
     # Scan on load
     _add_new_channels()
 
-    # Subscribe to new channel signals (area * channel wildcard not possible in HA
-    # dispatcher, so coordinator calls this helper when new channels appear)
     coordinator.on_new_channel_cbs.append(_add_new_channels)
+    coordinator.on_channel_type_change_cbs.append(_forget_channel)
 
 
 # ── Dimmable light ────────────────────────────────────────────────────────────
@@ -176,3 +178,9 @@ class DynaliteOnOffLight(DynaliteChannelEntity, LightEntity):
             ch.is_on = False
         self.async_write_ha_state()
         await self._coordinator.cmd_set_level(self._area, self._ch0, 0)
+
+    @callback
+    def _on_channel_update(self, ch) -> None:
+        if ch.name:
+            self._attr_name = ch.name
+        self.async_write_ha_state()

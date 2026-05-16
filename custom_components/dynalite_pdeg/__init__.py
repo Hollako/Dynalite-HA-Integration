@@ -25,14 +25,10 @@ async def async_setup_entry(
         port=entry.data[CONF_PORT],
     )
 
-    # ── Attach storage and restore persisted entities BEFORE platform setup ───
+    # ── Load storage BEFORE platform setup so platforms see existing data ────────
     storage = DynaliteStorage(hass, entry.entry_id)
     coordinator._storage = storage  # noqa: SLF001
     await storage.async_load(coordinator)   # populates coordinator.areas + channels
-    # ── Now platforms can register entities for already-known areas/channels ──
-
-    if not await coordinator.async_setup():
-        raise ConfigEntryNotReady("Unable to start Dynalite coordinator")
 
     entry.runtime_data = coordinator
 
@@ -48,9 +44,16 @@ async def async_setup_entry(
         configuration_url=f"http://{entry.data[CONF_HOST]}",
     )
 
+    # ── Platforms register their on_new_*_cbs callbacks here ─────────────────────
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_setup_services(hass)
     async_setup_websocket(hass)
+
+    # ── Start the client AFTER all callbacks are registered ───────────────────────
+    # This guarantees that any bus frame arriving after connection triggers entity
+    # creation immediately, with no race window where callbacks are still empty.
+    if not await coordinator.async_setup():
+        raise ConfigEntryNotReady("Unable to start Dynalite coordinator")
 
     # ── Remove legacy setpoint sensor entities (setpoint now lives in climate) ──
     from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
@@ -89,7 +92,7 @@ async def async_setup_entry(
             sidebar_title=entry.data.get("name", "Dynalite"),
             sidebar_icon="mdi:lightbulb-group",
             frontend_url_path=panel_url,
-            js_url=f"{static_url}/dynalite-config-panel.js?v=47",
+            js_url=f"{static_url}/dynalite-config-panel.js?v=81",
             config={"entry_id": entry.entry_id, "name": entry.data.get("name", "Dynalite PDEG")},
             require_admin=True,
         )

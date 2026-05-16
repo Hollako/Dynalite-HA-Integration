@@ -68,9 +68,13 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
 
+    def _forget_channel_cover(area: int, ch0: int) -> None:
+        known_channels.discard((area, ch0))
+
     _add_covers()
     coordinator.on_new_area_cbs.append(_add_covers)
     coordinator.on_new_channel_cbs.append(_add_covers)
+    coordinator.on_channel_type_change_cbs.append(_forget_channel_cover)
 
 
 # ── Preset-based area cover (Blind area type) ─────────────────────────────────

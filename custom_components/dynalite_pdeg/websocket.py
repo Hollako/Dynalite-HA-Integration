@@ -9,8 +9,8 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, LOGGER
-from .coordinator import AREA_TYPE_BLIND, AREA_TYPE_HVAC, AREA_TYPE_LIGHT
+from .const import DOMAIN, LOGGER, signal_channel_remove
+from .coordinator import AREA_TYPE_BLIND, AREA_TYPE_HVAC, AREA_TYPE_LIGHT, ChannelState
 
 if TYPE_CHECKING:
     from .coordinator import DynaliteCoordinator
@@ -426,26 +426,49 @@ async def ws_add_channel(
         connection.send_error(msg["id"], "not_found", "Integration not found")
         return
 
-    ar          = coord._touch_area(msg["area"])       # noqa: SLF001
-    ch          = coord._touch_channel(ar, msg["ch0"])  # noqa: SLF001
-    old_type    = ch.channel_type
-    old_partner = ch.cover_partner_ch0
-    new_type    = msg["channel_type"]
-    type_changed = new_type != old_type
+    area_num   = msg["area"]
+    ch0        = msg["ch0"]
+    new_type   = msg["channel_type"]
+    new_name   = msg["name"]
+    new_partner = msg.get("cover_partner_ch0")
 
+    ar = coord._touch_area(area_num)  # noqa: SLF001  — creates area if new
+
+    # ── 1. Remove any existing HA entity for this (area, ch0) slot ──────────────
+    #        Scan by config_entry_id — avoids unique_id format guessing.
+    #        Handles: re-adding a deleted channel, type override, manual HA delete.
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    ent_reg = er.async_get(hass)
+    ch_key  = f"_a{area_num}_c{ch0}_"
+    cov_key = f"_a{area_num}_cover_{ch0}_"
+    for entry in list(ent_reg.entities.values()):
+        if entry.config_entry_id == msg["entry_id"]:
+            uid = entry.unique_id
+            if ch_key in uid or cov_key in uid:
+                ent_reg.async_remove(entry.entity_id)
+                LOGGER.info("[WS] cleared old entity %s before re-add", entry.entity_id)
+
+    # ── 3. Evict (area, ch0) from every platform's known set ────────────────────
+    for cb in coord.on_channel_type_change_cbs:
+        cb(area_num, ch0)
+
+    # ── 4. Create / update channel in coordinator with correct type ──────────────
+    ch = ar.channels.get(ch0)
+    if ch is None:
+        ch = ChannelState(area=area_num, ch0=ch0)
+        ar.channels[ch0] = ch
     ch.channel_type = new_type
-    ch.name         = msg["name"]
-    if "cover_partner_ch0" in msg:
-        ch.cover_partner_ch0 = msg["cover_partner_ch0"]
+    ch.name         = new_name
+    if new_partner is not None:
+        ch.cover_partner_ch0 = new_partner
     coord.schedule_save()
-    LOGGER.info("[WS] added channel A%d Ch%d type=%s", msg["area"], msg["ch0"], new_type)
+    LOGGER.info("[WS] added channel A%d Ch%d type=%s", area_num, ch0, new_type)
 
-    if type_changed:
-        _remove_channel_entity(hass, coord.host, msg["area"], msg["ch0"], old_type, old_partner)
-        hass.async_create_task(hass.config_entries.async_reload(msg["entry_id"]))
-        connection.send_result(msg["id"], {"ok": True, "reloading": True})
-    else:
-        connection.send_result(msg["id"], {"ok": True, "reloading": False})
+    # ── 5. Fire creation callbacks — entity is now registered with correct type ──
+    for cb in coord.on_new_channel_cbs:
+        cb()
+
+    connection.send_result(msg["id"], {"ok": True, "reloading": False})
 
 
 # ── update_channel ────────────────────────────────────────────────────────────
@@ -496,7 +519,7 @@ async def ws_update_channel(
     LOGGER.info("[WS] updated channel A%d Ch%d (type_changed=%s)", msg["area"], msg["ch0"], type_changed)
 
     if type_changed:
-        # Remove old entity from registry before reload so it doesn't linger
+        # Remove old entity from registry before creating the new one
         _remove_channel_entity(hass, coord.host, msg["area"], msg["ch0"], old_type, old_partner)
 
     # When a cover is configured, the DOWN partner channel must lose its light entity
@@ -509,16 +532,26 @@ async def ws_update_channel(
                 partner_ch.channel_type,
                 partner_ch.cover_partner_ch0,
             )
+            for cb in coord.on_channel_type_change_cbs:
+                cb(msg["area"], ch.cover_partner_ch0)
             LOGGER.info(
                 "[WS] removed partner channel entity A%d Ch%d (DOWN relay of cover Ch%d)",
                 msg["area"], ch.cover_partner_ch0, msg["ch0"],
             )
 
     if type_changed:
-        hass.async_create_task(hass.config_entries.async_reload(msg["entry_id"]))
-        connection.send_result(msg["id"], {"ok": True, "reloading": True})
+        # Evict from each platform's `known` set so the new entity type gets created
+        for cb in coord.on_channel_type_change_cbs:
+            cb(msg["area"], msg["ch0"])
+        for cb in coord.on_new_channel_cbs:
+            cb()
     else:
-        connection.send_result(msg["id"], {"ok": True, "reloading": False})
+        # Name-only change: push a signal so the existing entity refreshes immediately
+        from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+        from .const import signal_channel  # noqa: PLC0415
+        async_dispatcher_send(hass, signal_channel(msg["area"], msg["ch0"]), ch)
+
+    connection.send_result(msg["id"], {"ok": True, "reloading": False})
 
 
 # ── delete_channel ────────────────────────────────────────────────────────────
@@ -540,11 +573,30 @@ async def ws_delete_channel(
         connection.send_error(msg["id"], "not_found", "Integration not found")
         return
 
-    ar = coord.areas.get(msg["area"])
-    if ar and msg["ch0"] in ar.channels:
-        del ar.channels[msg["ch0"]]
+    area_num = msg["area"]
+    ch0      = msg["ch0"]
+    ar = coord.areas.get(area_num)
+    if ar and ch0 in ar.channels:
+        # 1. Remove entity from the HA entity registry by scanning all entries for
+        #    this config entry — more robust than exact unique_id lookup.
+        from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+        from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
+        ent_reg  = er.async_get(hass)
+        ch_key   = f"_a{area_num}_c{ch0}_"       # matches light / switch
+        cov_key  = f"_a{area_num}_cover_{ch0}_"   # matches channel-cover UP channel
+        for entry in list(er.async_entries_for_config_entry(ent_reg, msg["entry_id"])):
+            if ch_key in entry.unique_id or cov_key in entry.unique_id:
+                ent_reg.async_remove(entry.entity_id)
+                LOGGER.info("[WS] removed entity %s (uid=%s)", entry.entity_id, entry.unique_id)
+        # 2. Also signal live entity objects so they tear themselves down cleanly
+        async_dispatcher_send(hass, signal_channel_remove(area_num, ch0))
+        # 3. Evict from each platform's known set so it won't be re-created
+        for cb in coord.on_channel_type_change_cbs:
+            cb(area_num, ch0)
+        # 4. Remove from in-memory state and persist
+        del ar.channels[ch0]
         coord.schedule_save()
-        LOGGER.info("[WS] deleted channel A%d Ch%d", msg["area"], msg["ch0"])
+        LOGGER.info("[WS] deleted channel A%d Ch%d", area_num, ch0 + 1)
     connection.send_result(msg["id"], {"ok": True})
 
 
@@ -1138,13 +1190,18 @@ async def ws_import_logical(
     coord.schedule_save()
     LOGGER.info("[WS] import_logical: imported=%d skipped=%d overwrite=%s", imported, skipped, msg["overwrite"])
 
-    result: dict = {"ok": True, "imported": imported, "skipped": skipped}
     if type_changed:
-        # Reload so entity types are updated
-        hass.async_create_task(hass.config_entries.async_reload(msg["entry_id"]))
-        result["reloading"] = True
+        # Fire entity-creation callbacks (same pattern as ws_update_channel).
+        # We don't know exactly which channels changed type, so fire on_new_channel_cbs
+        # which will create any missing entities.  Entities for old types were not
+        # removed here (import doesn't call _remove_channel_entity), so stale ones
+        # may linger until next HA restart — acceptable for a bulk import.
+        for cb in coord.on_new_area_cbs:
+            cb()
+        for cb in coord.on_new_channel_cbs:
+            cb()
 
-    connection.send_result(msg["id"], result)
+    connection.send_result(msg["id"], {"ok": True, "imported": imported, "skipped": skipped, "reloading": False})
 
 
 # ── import_devices ────────────────────────────────────────────────────────────

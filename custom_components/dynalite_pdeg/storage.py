@@ -145,6 +145,7 @@ class DynaliteStorage:
                 model=model,
                 name=d.get("name", ""),
                 has_lux=bool(d.get("has_lux", False)),
+                has_motion=bool(d.get("has_motion", False)),
             )
 
         # Restore configurable settings
@@ -221,6 +222,7 @@ class DynaliteStorage:
                 "box_number":  dev.box_number,
                 "name":        dev.name,
                 "has_lux":     dev.has_lux,
+                "has_motion":  dev.has_motion,
             }
             for dev in coordinator.devices.values()
         ]

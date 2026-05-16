@@ -40,6 +40,15 @@ class DynaliteConfigPanel extends HTMLElement {
     this._signonInterval      = 3600;   // local copy; loaded from backend
     this._xmlLogicalAreas     = [];     // parsed logical XML areas (for preview)
     this._xmlPhysicalDevices  = [];     // parsed devices XML entries (for preview)
+    this._autoRefreshTimer    = null;
+    this._dirtyAreas          = new Set();   // Set<areaNum> with unsaved area-level edits
+    this._dirtyChannels       = new Map();   // Map<areaNum, Set<ch0>> with unsaved channel edits
+  }
+
+  disconnectedCallback() {
+    clearInterval(this._autoRefreshTimer);
+    this._autoRefreshTimer = null;
+    if (this._hdrObserver) { this._hdrObserver.disconnect(); this._hdrObserver = null; }
   }
 
   set hass(hass) {
@@ -64,8 +73,6 @@ class DynaliteConfigPanel extends HTMLElement {
     this._entryName = (panel && panel.config && panel.config.name)     || "";
     const el = this.querySelector("#dp-entry-name");
     if (el) el.textContent = this._entryName;
-    const title = this.querySelector("#dp-appbar-title");
-    if (title) title.textContent = `Dynalite PDEG${this._entryName ? " — " + this._entryName : ""}`;
   }
 
   // ── Setup ──────────────────────────────────────────────────────────────────
@@ -83,6 +90,35 @@ class DynaliteConfigPanel extends HTMLElement {
     this._bindXmlImportEvents();
     this._reload();
     this._subscribeMotion();
+    this._startAutoRefresh();
+    this._watchHeaderHeight();
+  }
+
+  _watchHeaderHeight() {
+    const hdr = this.querySelector("#dp-panel-hdr");
+    if (!hdr) return;
+    const update = () => {
+      this.style.setProperty("--dp-thead-top", hdr.offsetHeight + "px");
+    };
+    update();
+    this._hdrObserver = new ResizeObserver(update);
+    this._hdrObserver.observe(hdr);
+  }
+
+  _startAutoRefresh() {
+    clearInterval(this._autoRefreshTimer);
+    this._autoRefreshTimer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      if (this._activeTab === "physical") {
+        this._reloadDevices().catch(() => {});
+      } else {
+        // Skip auto-refresh if there are unsaved changes or an inline form is open
+        const hasDirty = this._dirtyAreas.size > 0 ||
+          [...this._dirtyChannels.values()].some(s => s.size > 0);
+        const hasOpenForm = !!this.querySelector(".dp-add-form");
+        if (!hasDirty && !hasOpenForm) this._reloadAreas().catch(() => {});
+      }
+    }, 5000);
   }
 
   _subscribeMotion() {
@@ -108,26 +144,19 @@ class DynaliteConfigPanel extends HTMLElement {
   _skeleton() {
     return `
       <style>
-        /* ── App bar (sidebar toggle when sidebar is hidden) ── */
-        #dp-app-bar {
-          position: sticky; top: 0; z-index: 10;
-          display: flex; align-items: center;
-          height: 48px; padding-right: 16px;
-          background: var(--app-header-background-color, var(--primary-color, #03a9f4));
-          color: var(--app-header-text-color, #fff);
-          box-shadow: 0 2px 4px rgba(0,0,0,.24);
+        #dp-panel-hdr {
+          position: sticky; top: 0; z-index: 8;
+          background: var(--primary-background-color, #111);
+          padding: 16px 24px 20px;
+          box-shadow: 0 2px 6px rgba(0,0,0,.18);
         }
-        #dp-app-bar span {
-          font-size: 16px; font-weight: 400; letter-spacing: .005em;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        }
-
-        #dp-root { padding: 24px; color: var(--primary-text-color, #212121); }
-        #dp-root h1 { font-size: 24px; font-weight: 400; margin: 0 0 4px; }
+        #dp-panel-body { padding: 0 24px 24px; color: var(--primary-text-color, #212121); }
+        #dp-tab-physical { padding-top: 16px; }
+        #dp-panel-hdr h1, #dp-panel-body h1 { font-size: 24px; font-weight: 400; margin: 0 0 4px; }
 
         /* ── Tabs ── */
         .dp-tabs {
-          display: flex; gap: 0; margin-bottom: 20px;
+          display: flex; gap: 0; margin-bottom: 0;
           border-bottom: 2px solid var(--divider-color, #e0e0e0);
         }
         .dp-tab {
@@ -158,15 +187,19 @@ class DynaliteConfigPanel extends HTMLElement {
         table {
           width: 100%; border-collapse: collapse;
           background: var(--card-background-color, #fff);
-          border-radius: 8px; overflow: hidden;
+          border-radius: 8px;
           box-shadow: 0 1px 4px rgba(0,0,0,.12);
         }
+        thead { position: relative; z-index: 3; }
         th {
           text-align: left; padding: 10px 14px;
           border-bottom: 2px solid var(--divider-color, #e0e0e0);
           color: var(--secondary-text-color, #757575);
           font-size: 13px; font-weight: 500; white-space: nowrap;
+          position: sticky; top: var(--dp-thead-top, 180px); z-index: 3;
+          background: var(--primary-background-color, #111);
         }
+        tbody { isolation: isolate; }
         td {
           padding: 8px 14px;
           border-bottom: 1px solid var(--divider-color, #f0f0f0);
@@ -245,6 +278,26 @@ class DynaliteConfigPanel extends HTMLElement {
         .dp-device-rename-inp { flex: 1; min-width: 0; font-size: 13px; width: 0; }
         .dp-dev-save, .dp-dev-del { flex-shrink: 0; }
 
+        /* ── Scan modal ── */
+        #dp-scan-modal {
+          display: none; position: fixed; inset: 0; z-index: 1000;
+          background: rgba(0,0,0,.45);
+          align-items: center; justify-content: center;
+        }
+        #dp-scan-modal.open { display: flex; }
+        #dp-scan-modal-box {
+          background: var(--card-background-color, #fff);
+          border-radius: 10px; padding: 24px; width: 340px;
+          box-shadow: 0 8px 32px rgba(0,0,0,.22);
+        }
+        #dp-scan-modal-box h3 {
+          margin: 0 0 18px; font-size: 17px; font-weight: 500;
+        }
+        .dp-scan-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+        .dp-scan-field label { font-size: 13px; font-weight: 500; }
+        .dp-scan-field input { font-size: 14px; width: 100%; box-sizing: border-box; }
+        .dp-scan-field small { font-size: 11px; color: var(--secondary-text-color, #9e9e9e); }
+
         /* ── Logical panel (unchanged) ── */
         .dp-ch-row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
         .dp-ch-num { width: 82px; flex-shrink: 0; white-space: nowrap;
@@ -255,6 +308,9 @@ class DynaliteConfigPanel extends HTMLElement {
                        width: 90px; text-align: center; font-size: 11px; font-weight: 600; flex-shrink: 0; }
         .dp-badge-light  { background: #e3f2fd; color: #1565c0; }
         .dp-badge-cover  { background: #fff3e0; color: #e65100; }
+        .dp-dirty-dot    { color: #ff9800; font-size: 11px; font-weight: 700; flex-shrink: 0; display: none; }
+        .dp-area-dirty   { color: #ff9800; font-size: 11px; font-weight: 700; display: none; white-space: nowrap; }
+        .dp-btn-save-all { background: #ff9800 !important; color: #fff !important; font-weight: 600; }
         .dp-add-form {
           display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap;
           padding: 8px; border-radius: 6px;
@@ -292,45 +348,77 @@ class DynaliteConfigPanel extends HTMLElement {
         #dp-toast.dp-msg-err { background: #ffebee; color: #b71c1c; }
       </style>
 
-      <!-- Sticky top bar — provides the hamburger button when the sidebar is hidden -->
-      <div id="dp-app-bar">
-        <ha-menu-button id="dp-menu-btn"></ha-menu-button>
-        <span id="dp-appbar-title">Dynalite PDEG</span>
+      <!-- Bus scan dialog -->
+      <div id="dp-scan-modal">
+        <div id="dp-scan-modal-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+            <h3>⟳ Bus Scan</h3>
+            <button class="dp-btn dp-btn-neutral dp-btn-sm" id="dp-scan-close">✕</button>
+          </div>
+          <div class="dp-scan-field">
+            <label>Start Area #</label>
+            <input type="number" id="dp-scan-area-min" min="2" max="255" value="2">
+            <small>First area number to probe (minimum 2)</small>
+          </div>
+          <div class="dp-scan-field">
+            <label>Max Area #</label>
+            <input type="number" id="dp-scan-area-max" min="1" max="255" value="20">
+            <small>Last area number to probe (inclusive)</small>
+          </div>
+          <div class="dp-scan-field">
+            <label>Max Channels per Area</label>
+            <input type="number" id="dp-scan-ch-count" min="1" max="64" value="8">
+            <small>Channels 1 … N will be probed in each area</small>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+            <button class="dp-btn dp-btn-neutral" id="dp-scan-cancel">Cancel</button>
+            <button class="dp-btn dp-btn-primary" id="dp-scan-run">⟳ Start Scan</button>
+          </div>
+        </div>
       </div>
 
-      <div id="dp-root">
-        <!-- Header -->
-        <div class="dp-toolbar">
-          <div>
+      <!-- Sticky panel header: title + tabs (buttons inline in title row) -->
+      <div id="dp-panel-hdr">
+        <div class="dp-toolbar" style="margin-bottom:10px;flex-wrap:nowrap;align-items:flex-start;">
+          <div style="display:flex;align-items:flex-start;gap:4px;">
+            <ha-menu-button id="dp-menu-btn" style="margin-top:2px;flex-shrink:0;"></ha-menu-button>
+            <div>
             <h1>Dynalite PDEG - <span id="dp-entry-name">${this._entryName || ""}</span></h1>
             <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
               <span id="dp-status" class="dp-badge dp-fail">Connecting…</span>
             </div>
+            </div>
+          </div>
+          <!-- Physical tab buttons (visible when physical tab active) -->
+          <div id="dp-physical-btns" style="display:flex;gap:8px;align-items:stretch;flex-shrink:0;">
+            <button class="dp-btn dp-btn-primary" id="dp-add-device-btn">＋ Add Device</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-physical">📂 Import XML</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-signon-btn">📡 Send Sign-on</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-refresh-devices">↻ Refresh</button>
+          </div>
+          <!-- Logical tab buttons (visible when logical tab active) -->
+          <div id="dp-logical-btns" style="display:none;gap:8px;align-items:stretch;flex-shrink:0;">
+            <button class="dp-btn dp-btn-primary" id="dp-scan-btn">⟳ Initial Scan</button>
+            <button class="dp-btn dp-btn-primary" id="dp-add-area-btn">＋ Define New Area</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-logical">📂 Import XML</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-refresh-logical">↻ Refresh</button>
+            <button class="dp-btn dp-btn-save-all" id="dp-save-all-btn" style="display:none;">💾 Save All Changes</button>
           </div>
         </div>
-
-        <!-- Tab bar -->
         <div class="dp-tabs">
           <div class="dp-tab active" data-tab="physical">🔌 Physical</div>
           <div class="dp-tab"        data-tab="logical">💡 Logical</div>
         </div>
+      </div>
 
-        <!-- Floating toast (shared) -->
-        <div id="dp-toast"></div>
+      <!-- Floating toast (shared) -->
+      <div id="dp-toast"></div>
 
-        <!-- Physical tab -->
+      <!-- Scrollable panel body -->
+      <div id="dp-panel-body">
+
+        <!-- Physical tab content -->
         <div id="dp-tab-physical" class="dp-tab-content active">
-          <div class="dp-toolbar" style="margin-bottom:8px;">
-            <span style="font-size:13px;color:var(--secondary-text-color);">
-              Discovered modules — rename by typing a new name and clicking Save.
-            </span>
-            <div style="display:flex;gap:8px;align-items:center;">
-              <button class="dp-btn dp-btn-primary" id="dp-add-device-btn">＋ Add Device</button>
-              <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-physical">📂 Import XML</button>
-              <button class="dp-btn dp-btn-neutral" id="dp-signon-btn">📡 Send Sign-on</button>
-              <button class="dp-btn dp-btn-neutral" id="dp-refresh-devices">↻ Refresh</button>
-            </div>
-          </div>
           <!-- Sign-on interval setting -->
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;
                       padding:10px 14px;border-radius:6px;
@@ -408,16 +496,8 @@ class DynaliteConfigPanel extends HTMLElement {
           <div id="dp-device-grid" class="dp-device-grid"></div>
         </div>
 
-        <!-- Logical tab -->
+        <!-- Logical tab content -->
         <div id="dp-tab-logical" class="dp-tab-content">
-          <div class="dp-toolbar" style="margin-bottom:12px;">
-            <div></div>
-            <div style="display:flex;gap:8px;">
-              <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-logical">📂 Import XML</button>
-              <button class="dp-btn dp-btn-primary" id="dp-scan-btn">⟳ Run Scan</button>
-              <button class="dp-btn dp-btn-primary" id="dp-add-area-btn">＋ Define New Area</button>
-            </div>
-          </div>
           <!-- Logical XML import (hidden until a file is parsed) -->
           <input type="file" id="dp-xml-file-logical" accept=".xml" style="display:none;">
           <div id="dp-xml-import-logical" style="display:none;margin-bottom:16px;">
@@ -460,12 +540,13 @@ class DynaliteConfigPanel extends HTMLElement {
           </table>
           <div class="dp-footer">
             <small style="color:var(--secondary-text-color)">
-              Edit fields inline → <b>Save Area</b>.
+              Edit fields inline — use <b>💾 Save All Changes</b> to apply.
               Changing a channel type reloads the integration automatically.
             </small>
           </div>
         </div>
-      </div>`;
+
+      </div>`; /* end #dp-panel-body */
   }
 
   // ── Tab switching ──────────────────────────────────────────────────────────
@@ -478,6 +559,19 @@ class DynaliteConfigPanel extends HTMLElement {
         this.querySelectorAll(".dp-tab-content").forEach(c => {
           c.classList.toggle("active", c.id === `dp-tab-${this._activeTab}`);
         });
+        const phyBtns = this.querySelector("#dp-physical-btns");
+        const logBtns = this.querySelector("#dp-logical-btns");
+        if (phyBtns) phyBtns.style.display = this._activeTab === "physical" ? "flex" : "none";
+        if (logBtns) logBtns.style.display = this._activeTab === "logical"  ? "flex" : "none";
+        // Refresh immediately on tab switch rather than waiting for the next interval
+        if (this._activeTab === "physical") {
+          this._reloadDevices().catch(() => {});
+        } else {
+          const hasDirty = this._dirtyAreas.size > 0 ||
+            [...this._dirtyChannels.values()].some(s => s.size > 0);
+          const hasOpenForm = !!this.querySelector(".dp-add-form");
+          if (!hasDirty && !hasOpenForm) this._reloadAreas().catch(() => {});
+        }
       });
     });
 
@@ -614,6 +708,9 @@ class DynaliteConfigPanel extends HTMLElement {
       this._areas     = r.areas || [];
       this._connected = r.connected;
       this._updateStatusBadge();
+      this._dirtyAreas.clear();
+      this._dirtyChannels.clear();
+      this._updateSaveAllBtn();
       this._renderTable();
     } catch (e) {
       this._showMsg("Failed to load areas: " + e.message, true);
@@ -783,8 +880,70 @@ class DynaliteConfigPanel extends HTMLElement {
   // ── Logical tab — area table ───────────────────────────────────────────────
 
   _bindLogicalStaticEvents() {
-    this.querySelector("#dp-add-area-btn").addEventListener("click", () => this._addAreaPrompt());
-    this.querySelector("#dp-scan-btn").addEventListener("click",     () => this._runScan());
+    this.querySelector("#dp-add-area-btn").addEventListener("click",    () => this._addAreaPrompt());
+    this.querySelector("#dp-scan-btn").addEventListener("click",        () => this._openScanModal());
+    this.querySelector("#dp-save-all-btn").addEventListener("click",    () => this._saveAllChanges());
+    this.querySelector("#dp-refresh-logical").addEventListener("click", () => this._reloadAreas().catch(() => {}));
+
+    // ── Scan modal wiring ──────────────────────────────────────────────────────
+    const modal   = this.querySelector("#dp-scan-modal");
+    const closeModal = () => modal.classList.remove("open");
+
+    this.querySelector("#dp-scan-close").addEventListener("click",  closeModal);
+    this.querySelector("#dp-scan-cancel").addEventListener("click", closeModal);
+    // click on backdrop closes too
+    modal.addEventListener("click", e => { if (e.target === modal) closeModal(); });
+
+    this.querySelector("#dp-scan-run").addEventListener("click", async () => {
+      const areaMin  = parseInt(this.querySelector("#dp-scan-area-min").value);
+      const areaMax  = parseInt(this.querySelector("#dp-scan-area-max").value);
+      const chCount  = parseInt(this.querySelector("#dp-scan-ch-count").value);
+
+      if (isNaN(areaMin) || areaMin < 2 || areaMin > 255) {
+        this._showMsg("Start area must be between 2 and 255 (area 1 is reserved).", true); return;
+      }
+      if (isNaN(areaMax) || areaMax < areaMin || areaMax > 255) {
+        this._showMsg("Max area must be ≥ start area and ≤ 255.", true); return;
+      }
+      if (isNaN(chCount) || chCount < 1 || chCount > 64) {
+        this._showMsg("Max channels must be between 1 and 64.", true); return;
+      }
+
+      const btn = this.querySelector("#dp-scan-run");
+      btn.disabled = true;
+      btn.textContent = "Scanning…";
+
+      try {
+        await this._ws("dynalite_pdeg/run_scan", {
+          area_min:      areaMin,
+          area_max:      areaMax,
+          channel_count: chCount,
+        });
+        closeModal();
+        const total    = areaMax - areaMin + 1;
+        const estSecs  = Math.ceil(total * (1 + chCount) * 0.05) + 5;
+        this._showMsg(
+          `Scan started — areas ${areaMin}–${areaMax}, ${chCount} ch each. ` +
+          `Results appear in ~${estSecs}s.`
+        );
+        setTimeout(() => {
+          const hasDirty = this._dirtyAreas.size > 0 ||
+            [...this._dirtyChannels.values()].some(s => s.size > 0);
+          const hasOpenForm = !!this.querySelector(".dp-add-form");
+          if (!hasDirty && !hasOpenForm) this._reloadAreas().catch(() => {});
+        }, estSecs * 1000);
+      } catch (e) {
+        this._showMsg("Scan failed: " + e.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "⟳ Start Scan";
+      }
+    });
+  }
+
+  _openScanModal() {
+    this.querySelector("#dp-scan-modal").classList.add("open");
+    this.querySelector("#dp-scan-area-min").focus();
   }
 
   _renderTable() {
@@ -820,10 +979,9 @@ class DynaliteConfigPanel extends HTMLElement {
                        value="${this._esc(ch.name)}" placeholder="Cover name">
                 <span class="dp-ch-badge dp-badge-cover">Cover / Blind</span>
                 <span class="dp-ch-sel" style="border:none;background:none;"></span>
-                <button class="dp-btn dp-btn-ghost dp-btn-sm dp-ch-save"
-                        data-ch="${ch.ch0}" data-partner="${ch.cover_partner_ch0 ?? ""}">Save</button>
                 <button class="dp-btn dp-btn-danger dp-btn-sm dp-ch-del"
                         data-ch="${ch.ch0}" data-partner="${ch.cover_partner_ch0 ?? ""}">✕</button>
+                <span class="dp-dirty-dot" data-ch="${ch.ch0}" data-partner="${ch.cover_partner_ch0 ?? ""}">● Unsaved</span>
               </div>`;
           } else {
             const dispNum  = ch.ch0 + 1;
@@ -837,10 +995,9 @@ class DynaliteConfigPanel extends HTMLElement {
                        value="${this._esc(ch.name)}" placeholder="Channel ${dispNum}">
                 <span class="dp-ch-badge dp-badge-light">${TYPE_LABELS[ch.channel_type] || ch.channel_type}</span>
                 <select class="dp-ch-type-sel dp-ch-sel" data-ch="${ch.ch0}">${typeOpts}</select>
-                <button class="dp-btn dp-btn-ghost dp-btn-sm dp-ch-save"
-                        data-ch="${ch.ch0}" data-partner="">Save</button>
                 <button class="dp-btn dp-btn-danger dp-btn-sm dp-ch-del"
                         data-ch="${ch.ch0}" data-partner="">✕</button>
+                <span class="dp-dirty-dot" data-ch="${ch.ch0}" data-partner="">● Unsaved</span>
               </div>`;
           }
         })
@@ -890,16 +1047,22 @@ class DynaliteConfigPanel extends HTMLElement {
               🌡 Temp${ar.has_temp ? " ✓" : ""}
             </button>
           </div>
-          <!-- bottom: save (aligns with + Add Channel) -->
-          <button class="dp-btn dp-btn-primary dp-btn-sm dp-area-save">Save Area</button>
+          <!-- bottom: unsaved indicator -->
+          <span class="dp-area-dirty">● Unsaved</span>
         </div>
       </td>`;
 
-    tr.querySelector(".dp-area-save").addEventListener("click", () => this._saveArea(ar.area, tr));
+    tr.dataset.area = ar.area;
     tr.querySelector(".dp-area-del").addEventListener("click",  () => this._deleteArea(ar.area));
     tr.querySelector(".dp-area-pir").addEventListener("click",  () => this._togglePir(ar.area, ar.has_pir, tr));
     tr.querySelector(".dp-area-temp").addEventListener("click", () => this._toggleTemp(ar.area, ar.has_temp, tr));
     tr.querySelector(".dp-ch-add").addEventListener("click",    () => this._showAddChannelForm(ar.area, tr));
+
+    // Mark area dirty on any area-level field change
+    const markArea = () => this._markAreaDirty(ar.area);
+    tr.querySelector(".dp-name").addEventListener("input",   markArea);
+    tr.querySelector(".dp-fade").addEventListener("input",   markArea);
+    tr.querySelector(".dp-presets").addEventListener("input", markArea);
 
     // Populate curtain rows from loaded data
     const curtainList = tr.querySelector(".dp-curtain-list");
@@ -908,10 +1071,18 @@ class DynaliteConfigPanel extends HTMLElement {
     }
     tr.querySelector(".dp-curtain-add").addEventListener("click", () => {
       curtainList.appendChild(this._curtainRow({name: "", open_preset: 1, stop_preset: 3, close_preset: 2}));
+      this._markAreaDirty(ar.area);
     });
 
-    // Populate HVAC config
-    this._buildHvacConfig(tr.querySelector(".dp-hvac-config"), ar);
+    // Mark area dirty when any curtain field changes
+    curtainList.addEventListener("input",  () => this._markAreaDirty(ar.area));
+    curtainList.addEventListener("change", () => this._markAreaDirty(ar.area));
+
+    // Populate HVAC config — mark area dirty on any HVAC field change
+    const hvacContainer = tr.querySelector(".dp-hvac-config");
+    this._buildHvacConfig(hvacContainer, ar);
+    hvacContainer.addEventListener("input",  () => this._markAreaDirty(ar.area));
+    hvacContainer.addEventListener("change", () => this._markAreaDirty(ar.area));
 
     // Populate preset names editor (light areas)
     this._buildPresetNamesEditor(tr.querySelector(".dp-preset-names-wrap"), ar);
@@ -921,11 +1092,12 @@ class DynaliteConfigPanel extends HTMLElement {
       tr.querySelector(".dp-curtain-wrap").style.display  = newType === "blind" ? "block" : "none";
       tr.querySelector(".dp-hvac-config").style.display   = newType === "hvac"  ? "block" : "none";
       tr.querySelector(".dp-ch-content").style.display    = newType === "light" ? "block" : "none";
+      this._markAreaDirty(ar.area);
     });
 
     tr.querySelectorAll(".dp-ch-type-sel").forEach(sel => {
       sel.addEventListener("change", () => {
-        const ch0 = sel.dataset.ch;
+        const ch0 = parseInt(sel.dataset.ch);
         const row = tr.querySelector(`[data-chrow="${ch0}"]`);
         let downWrap = row.querySelector(".dp-down-wrap");
         if (sel.value === "cover") {
@@ -942,38 +1114,14 @@ class DynaliteConfigPanel extends HTMLElement {
         } else {
           if (downWrap) downWrap.remove();
         }
+        this._markChannelDirty(ar.area, ch0);
       });
     });
 
-    tr.querySelectorAll(".dp-ch-save").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const ch0     = parseInt(btn.dataset.ch);
-        const typeSel = tr.querySelector(`.dp-ch-type-sel[data-ch="${ch0}"]`);
-        const nameInp = tr.querySelector(`.dp-ch-name[data-ch="${ch0}"]`);
-        const name    = nameInp ? nameInp.value.trim() : "";
-        const channelType = typeSel ? typeSel.value : "cover";
-
-        let partnerCh0 = null;
-        const pStr = btn.dataset.partner;
-        if (pStr !== "") {
-          const pv = parseInt(pStr);
-          if (!isNaN(pv)) partnerCh0 = pv;
-        }
-        if (channelType === "cover" && partnerCh0 === null) {
-          const row     = tr.querySelector(`[data-chrow="${ch0}"]`);
-          const downInp = row ? row.querySelector(".dp-ch-down") : null;
-          if (!downInp || !downInp.value) {
-            alert("Enter the ↓ Down channel number (1–64) for this cover.");
-            return;
-          }
-          const dv = parseInt(downInp.value);
-          if (isNaN(dv) || dv < 1 || dv > 64 || (dv - 1) === ch0) {
-            alert("Invalid down channel number.");
-            return;
-          }
-          partnerCh0 = dv - 1;
-        }
-        this._saveChannel(ar.area, ch0, channelType, name, partnerCh0);
+    // Mark channel dirty on name edit
+    tr.querySelectorAll(".dp-ch-name").forEach(inp => {
+      inp.addEventListener("input", () => {
+        this._markChannelDirty(ar.area, parseInt(inp.dataset.ch));
       });
     });
 
@@ -1061,9 +1209,106 @@ class DynaliteConfigPanel extends HTMLElement {
     });
   }
 
+  // ── Dirty-tracking helpers ─────────────────────────────────────────────────
+
+  _markAreaDirty(areaNum) {
+    this._dirtyAreas.add(areaNum);
+    const tr = this.querySelector(`tr[data-area="${areaNum}"]`);
+    if (tr) tr.querySelector(".dp-area-dirty").style.display = "inline";
+    this._updateSaveAllBtn();
+  }
+
+  _markChannelDirty(areaNum, ch0) {
+    if (!this._dirtyChannels.has(areaNum)) this._dirtyChannels.set(areaNum, new Set());
+    this._dirtyChannels.get(areaNum).add(ch0);
+    const tr = this.querySelector(`tr[data-area="${areaNum}"]`);
+    if (tr) {
+      const dot = tr.querySelector(`.dp-dirty-dot[data-ch="${ch0}"]`);
+      if (dot) dot.style.display = "inline";
+    }
+    this._updateSaveAllBtn();
+  }
+
+  _updateSaveAllBtn() {
+    const btn = this.querySelector("#dp-save-all-btn");
+    if (!btn) return;
+    let n = this._dirtyAreas.size;
+    for (const chs of this._dirtyChannels.values()) n += chs.size;
+    if (n === 0) {
+      btn.style.display = "none";
+      btn.disabled = false;
+    } else {
+      btn.disabled = false;
+      btn.style.display = "inline-flex";
+      btn.textContent = `💾 Save All Changes (${n})`;
+    }
+  }
+
+  async _saveAllChanges() {
+    const btn = this.querySelector("#dp-save-all-btn");
+    if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+
+    const errors = [];
+
+    // Save dirty areas
+    for (const areaNum of [...this._dirtyAreas]) {
+      const tr = this.querySelector(`tr[data-area="${areaNum}"]`);
+      if (!tr) continue;
+      try { await this._saveArea(areaNum, tr, true); }
+      catch (e) { errors.push(`Area ${areaNum}: ${e.message}`); }
+    }
+
+    // Save dirty channels
+    for (const [areaNum, ch0Set] of this._dirtyChannels) {
+      const tr = this.querySelector(`tr[data-area="${areaNum}"]`);
+      if (!tr) continue;
+      for (const ch0 of ch0Set) {
+        const typeSel = tr.querySelector(`.dp-ch-type-sel[data-ch="${ch0}"]`);
+        const nameInp = tr.querySelector(`.dp-ch-name[data-ch="${ch0}"]`);
+        const name    = nameInp ? nameInp.value.trim() : "";
+        const channelType = typeSel ? typeSel.value : "cover";
+
+        // Resolve partner for cover channels
+        let partnerCh0 = null;
+        const dirtyDot = tr.querySelector(`.dp-dirty-dot[data-ch="${ch0}"]`);
+        const pStr = dirtyDot ? dirtyDot.dataset.partner : "";
+        if (pStr !== "") {
+          const pv = parseInt(pStr);
+          if (!isNaN(pv)) partnerCh0 = pv;
+        }
+        // New cover (type changed to cover via select) needs down channel input
+        if (channelType === "cover" && partnerCh0 === null) {
+          const chRow  = tr.querySelector(`[data-chrow="${ch0}"]`);
+          const downInp = chRow ? chRow.querySelector(".dp-ch-down") : null;
+          if (!downInp || !downInp.value) {
+            errors.push(`Area ${areaNum} Ch ${ch0 + 1}: enter the ↓ Down channel number.`);
+            continue;
+          }
+          const dv = parseInt(downInp.value);
+          if (isNaN(dv) || dv < 1 || dv > 64 || (dv - 1) === ch0) {
+            errors.push(`Area ${areaNum} Ch ${ch0 + 1}: invalid down channel number.`);
+            continue;
+          }
+          partnerCh0 = dv - 1;
+        }
+
+        try {
+          await this._saveChannel(areaNum, ch0, channelType, name, partnerCh0, true);
+        } catch (e) { errors.push(`Area ${areaNum} Ch ${ch0 + 1}: ${e.message}`); }
+      }
+    }
+
+    if (errors.length) {
+      this._showMsg("Some items failed: " + errors.join("; "), true);
+    } else {
+      this._showMsg("All changes saved.");
+    }
+    await this._reloadAreas();
+  }
+
   // ── Logical actions ────────────────────────────────────────────────────────
 
-  async _saveArea(areaNum, tr) {
+  async _saveArea(areaNum, tr, skipReload = false) {
     const name     = tr.querySelector(".dp-name").value.trim();
     const fadeSecs = Math.max(0.1, parseFloat(tr.querySelector(".dp-fade").value) || 2);
     const presets  = parseInt(tr.querySelector(".dp-presets").value) || 4;
@@ -1125,9 +1370,14 @@ class DynaliteConfigPanel extends HTMLElement {
 
     try {
       await this._ws("dynalite_pdeg/update_area", payload);
-      this._showMsg(`Area ${areaNum} saved.`);
-      await this._reloadAreas();
-    } catch (e) { this._showMsg(e.message, true); }
+      if (!skipReload) {
+        this._showMsg(`Area ${areaNum} saved.`);
+        await this._reloadAreas();
+      }
+    } catch (e) {
+      if (!skipReload) this._showMsg(e.message, true);
+      else throw e;
+    }
   }
 
   // ── HVAC config builder ────────────────────────────────────────────────────
@@ -1325,12 +1575,17 @@ class DynaliteConfigPanel extends HTMLElement {
 
     buildRows(count);
 
+    // Mark area dirty when any preset name input changes
+    body.addEventListener("input", () => this._markAreaDirty(ar.area));
+
     // ── toggle click ──────────────────────────────────────────────────────────
     let open = false;
     header.addEventListener("click", () => {
       open = !open;
       body.style.display = open ? "block" : "none";
       header.querySelector(".dp-pn-arrow").textContent = open ? "▼" : "▶";
+      // Keep auto-refresh paused while the panel is open
+      if (open) this._markAreaDirty(ar.area);
     });
 
     container.appendChild(header);
@@ -1350,6 +1605,9 @@ class DynaliteConfigPanel extends HTMLElement {
         preset_names: names,
       });
       this._showMsg(`Preset names for Area ${areaNum} saved.`);
+      // Clear dirty flag so auto-refresh can resume
+      this._dirtyAreas.delete(areaNum);
+      this._updateSaveAllBtn();
       // Refresh local area state
       const r = await this._ws("dynalite_pdeg/list_areas");
       const updated = (r.areas || []).find(a => a.area === areaNum);
@@ -1400,28 +1658,28 @@ class DynaliteConfigPanel extends HTMLElement {
   }
 
   _addAreaPrompt() {
-    const num = prompt("Area number to add (1–255):");
+    const num = prompt("Area number to add (2–255):");
     if (num === null) return;
     const area = parseInt(num);
-    if (!area || area < 1 || area > 255) { alert("Invalid area number."); return; }
+    if (!area || area < 2 || area > 255) { alert("Invalid area number (must be 2–255)."); return; }
     this._ws("dynalite_pdeg/add_area", { area })
       .then(() => { this._showMsg(`Area ${area} added.`); return this._reloadAreas(); })
       .catch(e => this._showMsg(e.message, true));
   }
 
-  async _saveChannel(areaNum, ch0, channelType, name, partnerCh0 = null) {
+  async _saveChannel(areaNum, ch0, channelType, name, partnerCh0 = null, skipReload = false) {
     const payload = { area: areaNum, ch0, channel_type: channelType, name };
     if (channelType === "cover" && partnerCh0 !== null) payload.cover_partner_ch0 = partnerCh0;
     try {
-      const res = await this._ws("dynalite_pdeg/update_channel", payload);
-      if (res && res.reloading) {
-        this._showMsg(`Ch ${ch0 + 1} type changed — reloading integration, please wait…`);
-        setTimeout(() => this._reloadAreas(), 5000);
-      } else {
+      await this._ws("dynalite_pdeg/update_channel", payload);
+      if (!skipReload) {
         this._showMsg(`Channel ${ch0 + 1} saved.`);
         await this._reloadAreas();
       }
-    } catch (e) { this._showMsg(e.message, true); }
+    } catch (e) {
+      if (!skipReload) this._showMsg(e.message, true);
+      else throw e;
+    }
   }
 
   async _deleteChannel(areaNum, ch0, confirmMsg = null) {
@@ -1431,14 +1689,6 @@ class DynaliteConfigPanel extends HTMLElement {
       await this._ws("dynalite_pdeg/delete_channel", { area: areaNum, ch0 });
       this._showMsg("Channel deleted.");
       await this._reloadAreas();
-    } catch (e) { this._showMsg(e.message, true); }
-  }
-
-  async _runScan() {
-    try {
-      await this._ws("dynalite_pdeg/run_scan", {});
-      this._showMsg("Scan started — results will appear within 30 seconds.");
-      setTimeout(() => this._reloadAreas(), 10000);
     } catch (e) { this._showMsg(e.message, true); }
   }
 

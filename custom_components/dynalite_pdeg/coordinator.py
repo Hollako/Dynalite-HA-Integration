@@ -43,6 +43,7 @@ from .const import (
     signal_channel,
     signal_connection,
     signal_device,
+    signal_device_motion,
     signal_lux,
 )
 from .dynalite_client import DynaliteClient
@@ -125,6 +126,7 @@ class PhysicalDevice:
     model: str = ""
     name: str = ""          # user-defined custom name (empty = use model default)
     has_lux: bool = False
+    has_motion: bool = False            # True once a motion frame has been seen
     lux_value: float | None = None
     motion_detected: bool | None = None   # None = never seen a motion frame
 
@@ -148,8 +150,9 @@ class DynaliteCoordinator:
         # Configurable sign-on poll interval (seconds); persisted via storage
         self.signon_interval: int = SIGNON_INTERVAL
         # Platform hooks — lists so multiple platforms can register
-        self.on_new_channel_cbs: list[callable] = []   # type: ignore[type-arg]
-        self.on_new_area_cbs:    list[callable] = []   # type: ignore[type-arg]
+        self.on_new_channel_cbs:          list[callable] = []   # type: ignore[type-arg]
+        self.on_channel_type_change_cbs:  list[callable] = []   # (area, ch0) — evict from known
+        self.on_new_area_cbs:             list[callable] = []   # type: ignore[type-arg]
         self.on_new_pir_cbs:     list[callable] = []   # type: ignore[type-arg]
         self.on_remove_pir_cbs:  list[callable] = []   # type: ignore[type-arg]  called with area:int when PIR is disabled
         self.on_new_sensor_cbs:  list[callable] = []   # type: ignore[type-arg]
@@ -159,9 +162,11 @@ class DynaliteCoordinator:
         self.on_remove_device_cbs: list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when device deleted
         self.on_new_lux_cbs:       list[callable] = []   # type: ignore[type-arg]
         self.on_remove_lux_cbs:    list[callable] = []   # type: ignore[type-arg]  called with (dc, bn) when lux disabled
+        self.on_new_device_motion_cbs: list[callable] = []  # type: ignore[type-arg]  called when a device first reports motion
         # Storage — injected by __init__.py after construction
         self._storage = None
         self._save_task: asyncio.Task | None = None
+        self._signon_recheck_task: asyncio.Task | None = None
         # Protection map: (area, ch0) → monotonic expiry time.
         # After a 0x6B optimistic update we block all 0x60 level reports for that
         # channel for a few seconds so bus poll responses can't overwrite the
@@ -521,19 +526,29 @@ class DynaliteCoordinator:
 
         elif opcode == OP_TEMP_REPORT:
             # 0x4A format: b[4] = integer °C (signed byte), b[5] = hundredths.
-            # Always store the value so climate entities can show current_temperature,
-            # but do NOT auto-enable has_temp — that is controlled only by the user
-            # via the panel toggle (ws_set_temp_sensor).
             ar = self._touch_area(area_num)
             ar.temp_c = self._decode_temp_4a(b[4], b[5])
+            is_new_temp = not ar.has_temp
+            ar.has_temp = True
+            if is_new_temp:
+                for cb in self.on_new_sensor_cbs:
+                    cb()
+                self.schedule_save()
+                LOGGER.info("[A%d] temperature sensor auto-enabled (0x4A)", area_num)
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             LOGGER.debug("[A%d] temp %.2f°C (0x4A)", area_num, ar.temp_c)
 
         elif opcode == OP_TEMP_REPORT_ALT:
-            # 0xF6 fallback: Q2 signed int16 (°C × 4). Same policy — store but
-            # do not auto-enable has_temp.
+            # 0xF6 fallback: Q2 signed int16 (°C × 4).
             ar = self._touch_area(area_num)
             ar.temp_c = self._decode_temp(b[4], b[5])
+            is_new_temp = not ar.has_temp
+            ar.has_temp = True
+            if is_new_temp:
+                for cb in self.on_new_sensor_cbs:
+                    cb()
+                self.schedule_save()
+                LOGGER.info("[A%d] temperature sensor auto-enabled (0xF6)", area_num)
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             LOGGER.debug("[A%d] temp %.2f°C (0xF6/Q2)", area_num, ar.temp_c)
 
@@ -551,6 +566,27 @@ class DynaliteCoordinator:
                 self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             LOGGER.debug("[A%d] setpt %.1f°C", area_num, ar.setpt_c)
+
+    def _schedule_signon_recheck(self) -> None:
+        """Debounced: run a full sign-on poll 15 s after the last new-device event.
+
+        When a new device is discovered the old box number (if it was renamed/
+        reconfigured) may still appear online from a previous poll.  Re-running
+        _poll_all_devices will mark it offline when it no longer responds.
+        Multiple discoveries within 15 s are coalesced into a single poll.
+        """
+        if self._signon_recheck_task and not self._signon_recheck_task.done():
+            self._signon_recheck_task.cancel()
+        self._signon_recheck_task = asyncio.ensure_future(self._delayed_signon_recheck())
+
+    async def _delayed_signon_recheck(self) -> None:
+        await asyncio.sleep(15)
+        if self.client.connected and self.devices:
+            LOGGER.info(
+                "[Coordinator] re-checking all devices after new discovery (%d device(s))",
+                len(self.devices),
+            )
+            await self._poll_all_devices()
 
     def _handle_physical(self, b: bytes) -> None:
         device_code = b[1]
@@ -577,14 +613,17 @@ class DynaliteCoordinator:
             if b[4] == 0x0D:
                 # Motion sub-type: b[5]/b[6] = 0xFF/0xFF detected, 0x00/0x00 vacant
                 detected = b[5] == 0xFF and b[6] == 0xFF
+                is_new_motion = not dev.has_motion
+                dev.has_motion = True
                 dev.motion_detected = detected
-                self.hass.bus.fire(
-                    f"{DOMAIN}_device_motion",
-                    {
-                        "device_code": device_code,
-                        "box_number":  box_number,
-                        "motion":      detected,
-                    },
+                if is_new_motion:
+                    for cb in self.on_new_device_motion_cbs:
+                        cb()
+                    self.schedule_save()
+                    LOGGER.info("[Device 0x%02X box %d] motion sensor auto-enabled",
+                                device_code, box_number)
+                async_dispatcher_send(
+                    self.hass, signal_device_motion(device_code, box_number), detected
                 )
                 LOGGER.debug("[Device 0x%02X box %d] motion → %s",
                              device_code, box_number, "detected" if detected else "vacant")
@@ -647,6 +686,9 @@ class DynaliteCoordinator:
             for cb in self.on_new_device_cbs:
                 cb()
             self.schedule_save()
+            # A new box number appeared — re-poll all devices shortly after so that
+            # any old box number (reconfigured away) gets marked offline automatically.
+            self._schedule_signon_recheck()
 
         if not was_online:
             async_dispatcher_send(self.hass, signal_device(device_code, box_number), True)
@@ -895,12 +937,18 @@ class DynaliteCoordinator:
         """Send a Recall/Fade-to-Level command.
 
         fade_tenths: override the fade time (0.1 s units).
-                     If None, the area's configured fade is used.
+                     If None, the area's configured fade is used — except for
+                     on/off and switch channels which always snap (fade_tenths=1)
+                     regardless of the area fade setting.
                      Pass 0 explicitly for instant switching (e.g. covers).
         """
         ar = self.areas.get(area)
         if fade_tenths is None:
-            fade_tenths = ar.fade_tenths if ar else 0
+            ch = ar.channels.get(ch0) if ar else None
+            if ch and ch.channel_type in (CHANNEL_TYPE_ONOFF, CHANNEL_TYPE_SWITCH):
+                fade_tenths = 1   # on/off relays: minimum fade (0.1 s) — ignore area fade
+            else:
+                fade_tenths = ar.fade_tenths if ar else 0
         LOGGER.debug("[Coordinator] cmd_set_level A%d Ch%d → %d%% fade=%.1fs",
                      area, ch0 + 1, pct, fade_tenths / 10)
         await self.client.set_level(area, ch0, pct, fade_tenths)
