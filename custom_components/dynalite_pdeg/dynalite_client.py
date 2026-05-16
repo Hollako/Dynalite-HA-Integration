@@ -226,6 +226,24 @@ class DynaliteClient:
         LOGGER.info("[TX] restore_saved_preset A%d fade=%ds", area, fade_tenths / 10)
         await self._send(frame)
 
+    async def request_current_temp(self, area: int) -> None:
+        """Request the current measured temperature for an HVAC area (opcode 0x49, b[2]=0x06).
+
+        The controller replies with a 0x4A frame where b[2]=0x0C, b[4]=integer °C, b[5]=hundredths.
+        """
+        frame = bytes([SYNC_LOGICAL, area, 0x06, 0x49, 0x7F, 0x00, 0xFF, 0x00])
+        LOGGER.debug("[TX] request_current_temp  A%d", area)
+        await self._send(frame)
+
+    async def request_setpoint(self, area: int) -> None:
+        """Request the current temperature setpoint for an HVAC area (opcode 0x49, b[2]=0x07).
+
+        The controller replies with a 0x4A frame where b[2]=0x0D, b[4]=integer °C, b[5]=hundredths.
+        """
+        frame = bytes([SYNC_LOGICAL, area, 0x07, 0x49, 0xFF, 0x00, 0xFF, 0x00])
+        LOGGER.debug("[TX] request_setpoint  A%d", area)
+        await self._send(frame)
+
     async def request_motion_status(self, device_code: int, box_number: int) -> None:
         """Request current motion status from a physical device (opcode 0xB7, sub 0x0D).
 

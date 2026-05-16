@@ -36,9 +36,9 @@ OP_MOTION_DETECT   = 0x2E   # Motion trigger (instantaneous); b[2]=channel (0xFF
 OP_VACANT          = 0x3E   # Custom vacant signal — area is now unoccupied
 OP_OCC_DISABLE     = 0x3A   # occupancy detection disabled for area
 OP_OCC_ENABLE      = 0x3B   # occupancy detection enabled  for area
-OP_TEMP_REPORT     = 0x4A   # actual temperature;    b[4]=integer °C (signed), b[5]=hundredths
+OP_TEMP_REPORT     = 0x4A   # temp/setpoint reply;   b[2]=0x0C→current temp, b[2]=0x0D→setpoint
 OP_TEMP_REPORT_ALT = 0xF6   # alternate temp opcode (Q2 format); kept for compat
-OP_SETPOINT_REPORT = 0x76   # setpoint temperature;  b[4]=hi, b[5]=lo (Q2)
+OP_REQUEST_TEMP    = 0x49   # request temp/setpoint; b[2]=0x06→current temp, b[2]=0x07→setpoint
 OP_LUX_REPORT           = 0xB8   # ambient light level / motion status reply (physical, 0x5C sync)
 OP_PHYSICAL_STATUS_REQ  = 0xB7   # Request Physical Status (physical, 0x5C sync); b[4]=0x0D for motion
 

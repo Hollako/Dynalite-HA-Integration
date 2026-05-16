@@ -24,7 +24,7 @@ from .const import (
     OP_OCCUPANCY,
     OP_PRESET_REPORT,
     OP_REQUEST_PRESET,
-    OP_SETPOINT_REPORT,
+    OP_SET_SETPOINT,
     OP_SIGNON_REPLY,
     OP_SIGNON_REPLY_AC,
     OP_SIGNON_REQUEST,
@@ -276,6 +276,15 @@ class DynaliteCoordinator:
                         return
                     await self.client.request_level(area_num, ch0)
                     await asyncio.sleep(0.05)
+                # For HVAC areas: also refresh current temperature and setpoint
+                ar = self.areas[area_num]
+                if ar.area_type == AREA_TYPE_HVAC:
+                    if not self.client.connected:
+                        return
+                    await self.client.request_current_temp(area_num)
+                    await asyncio.sleep(0.05)
+                    await self.client.request_setpoint(area_num)
+                    await asyncio.sleep(0.05)
             LOGGER.info("[Coordinator] reconnect sequence complete.")
         else:
             # No stored entities — run an initial auto-scan
@@ -398,14 +407,15 @@ class DynaliteCoordinator:
             # Frame layout:
             #   b[2] = level (inverted: 0xFF=0%, 0x01=100%) — not used here
             #   b[3] = opcode (0x80–0x83) encodes sub-channel within bank (0–3)
-            #   b[4] = bank code:
-            #            >= 0x80 → bank = 2 * (255 - b[4])   e.g. 0xFF→0, 0xFE→2, 0xFD→4
-            #            <  0x80 → bank = 2 * b[4] + 1       e.g. 0x00→1, 0x01→3, 0x02→5
+            #   b[4] = bank index − 1 (wrapping signed byte):
+            #            0xFF → bank 0  (channels  1– 4)
+            #            0x00 → bank 1  (channels  5– 8)
+            #            0x01 → bank 2  (channels  9–12)
+            #            0x02 → bank 3  (channels 13–16)  …etc.
             #   b[5] = fade time
             # Channel (0-based): ch0 = bank * 4 + (opcode - 0x80)
             sub_ch    = opcode - 0x80
-            bank_code = b[4]
-            bank      = 2 * (255 - bank_code) if bank_code >= 0x80 else 2 * bank_code + 1
+            bank      = (b[4] + 1) & 0xFF
             ch0       = bank * 4 + sub_ch
             LOGGER.debug("[A%d Ch%d] set-level (0x8x family) detected — requesting level",
                          area_num, ch0 + 1)
@@ -525,18 +535,38 @@ class DynaliteCoordinator:
             LOGGER.debug("[A%d] 0x3E vacant signal received", area_num)
 
         elif opcode == OP_TEMP_REPORT:
-            # 0x4A format: b[4] = integer °C (signed byte), b[5] = hundredths.
-            ar = self._touch_area(area_num)
-            ar.temp_c = self._decode_temp_4a(b[4], b[5])
-            is_new_temp = not ar.has_temp
-            ar.has_temp = True
-            if is_new_temp:
-                for cb in self.on_new_sensor_cbs:
-                    cb()
-                self.schedule_save()
-                LOGGER.info("[A%d] temperature sensor auto-enabled (0x4A)", area_num)
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
-            LOGGER.debug("[A%d] temp %.2f°C (0x4A)", area_num, ar.temp_c)
+            # 0x4A — dual-purpose reply, distinguished by b[2]:
+            #   b[2]=0x0D → setpoint reply  (response to 0x49 b[2]=0x07 request)
+            #   b[2]=0x0C → current temperature reply (response to 0x49 b[2]=0x06 request)
+            # Both use: b[4]=integer °C (signed), b[5]=hundredths  e.g. 0x18/0x05 = 24.05°C
+            ar    = self._touch_area(area_num)
+            val_c = self._decode_temp_4a(b[4], b[5])
+            if b[2] == 0x0D:
+                # ── Setpoint reply ────────────────────────────────────────────
+                is_new = not ar.has_setpt
+                ar.has_setpt = True
+                ar.setpt_c   = val_c
+                if is_new:
+                    for cb in self.on_new_sensor_cbs:
+                        cb()
+                    if ar.has_temp:
+                        for cb in self.on_new_climate_cbs:
+                            cb()
+                    self.schedule_save()
+                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                LOGGER.debug("[A%d] setpt %.2f°C (0x4A/0x0D reply)", area_num, ar.setpt_c)
+            else:
+                # ── Current temperature reply (b[2]=0x0C or spontaneous) ─────
+                ar.temp_c = val_c
+                is_new_temp = not ar.has_temp
+                ar.has_temp = True
+                if is_new_temp:
+                    for cb in self.on_new_sensor_cbs:
+                        cb()
+                    self.schedule_save()
+                    LOGGER.info("[A%d] temperature sensor auto-enabled (0x4A)", area_num)
+                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                LOGGER.debug("[A%d] temp %.2f°C (0x4A)", area_num, ar.temp_c)
 
         elif opcode == OP_TEMP_REPORT_ALT:
             # 0xF6 fallback: Q2 signed int16 (°C × 4).
@@ -552,11 +582,20 @@ class DynaliteCoordinator:
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             LOGGER.debug("[A%d] temp %.2f°C (0xF6/Q2)", area_num, ar.temp_c)
 
-        elif opcode == OP_SETPOINT_REPORT:
+        elif opcode == OP_SET_SETPOINT:
+            # Incoming 0x48 — setpoint changed from a keypad or physical controller.
+            # Frame layout (from bus captures):
+            #   b[2] = control point (0x0D from keypad; 0x07 = echo of our own Q2 TX)
+            #   b[4] = integer °C  (plain value, e.g. 0x1A = 26°C)
+            #   b[5] = fractional hundredths (0x00 in all observed frames)
+            # Skip echo of our own outgoing command (b[2]=0x07 uses Q2 encoding, not plain °C)
+            if b[2] == 0x07:
+                return
+            temp_c = float(b[4]) + b[5] / 100.0
             ar = self._touch_area(area_num)
             is_new = not ar.has_setpt
             ar.has_setpt = True
-            ar.setpt_c   = self._decode_temp(b[4], b[5])
+            ar.setpt_c   = temp_c
             if is_new:
                 for cb in self.on_new_sensor_cbs:
                     cb()
@@ -565,7 +604,7 @@ class DynaliteCoordinator:
                         cb()
                 self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
-            LOGGER.debug("[A%d] setpt %.1f°C", area_num, ar.setpt_c)
+            LOGGER.debug("[A%d] setpt %.1f°C (0x48 from keypad/controller)", area_num, ar.setpt_c)
 
     def _schedule_signon_recheck(self) -> None:
         """Debounced: run a full sign-on poll 15 s after the last new-device event.
