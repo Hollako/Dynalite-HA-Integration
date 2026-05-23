@@ -42,6 +42,8 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_lux_sensor)
     websocket_api.async_register_command(hass, ws_request_motion_status)
     websocket_api.async_register_command(hass, ws_update_preset_names)
+    websocket_api.async_register_command(hass, ws_get_backup)
+    websocket_api.async_register_command(hass, ws_restore_backup)
     LOGGER.debug("[WS] websocket commands registered")
 
 
@@ -1424,3 +1426,171 @@ async def ws_update_preset_names(
 
     LOGGER.info("[WS] preset names updated for area %d: %s", area_num, new_names)
     connection.send_result(msg["id"], {"ok": True, "preset_names": {str(k): v for k, v in new_names.items()}})
+
+
+# ── get_backup ────────────────────────────────────────────────────────────────
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"):     "dynalite_pdeg/get_backup",
+    vol.Required("entry_id"): str,
+    vol.Required("section"):  vol.In(["logical", "physical"]),
+})
+@websocket_api.async_response
+async def ws_get_backup(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Return a serialised backup of the logical (areas/channels) or physical
+    (devices) configuration so the panel can offer a JSON download."""
+    import datetime  # noqa: PLC0415
+
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+
+    from .storage import DynaliteStorage  # noqa: PLC0415
+    full    = DynaliteStorage._serialize(coord)
+    section = msg["section"]
+
+    result: dict = {
+        "version":   1,
+        "section":   section,
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    if section == "logical":
+        result["areas"] = full["areas"]
+    else:  # physical
+        result["devices"]          = full["devices"]
+        result["signon_interval"]  = full["signon_interval"]
+
+    LOGGER.info("[WS] backup requested: section=%s  areas=%d  devices=%d",
+                section,
+                len(result.get("areas",   [])),
+                len(result.get("devices", [])))
+    connection.send_result(msg["id"], result)
+
+
+# ── restore_backup ────────────────────────────────────────────────────────────
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"):     "dynalite_pdeg/restore_backup",
+    vol.Required("entry_id"): str,
+    vol.Required("section"):  vol.In(["logical", "physical"]),
+    vol.Required("data"):     dict,
+})
+@websocket_api.async_response
+async def ws_restore_backup(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict,
+) -> None:
+    """Apply a backup dict to the coordinator, persist it, then reload the entry."""
+    coord = _get_coordinator(hass, msg["entry_id"])
+    if not coord:
+        connection.send_error(msg["id"], "not_found", "Integration not found")
+        return
+
+    backup  = msg["data"]
+    section = msg["section"]
+
+    # ── Validate basic structure ──────────────────────────────────────────────
+    if backup.get("version") != 1:
+        connection.send_error(msg["id"], "invalid_data", "Unsupported backup version")
+        return
+    if backup.get("section") not in (section, None):
+        connection.send_error(
+            msg["id"], "invalid_data",
+            f"Backup section mismatch: file is '{backup.get('section')}', expected '{section}'"
+        )
+        return
+
+    if section == "logical":
+        # ── Re-populate areas from backup ─────────────────────────────────────
+        from .coordinator import (  # noqa: PLC0415
+            AreaState, ChannelState, AREA_TYPE_LIGHT,
+            CHANNEL_TYPE_DIMMER, CHANNEL_TYPE_ONOFF,
+        )
+        coord.areas.clear()
+        for a in backup.get("areas", []):
+            area_num = a.get("area")
+            if not area_num:
+                continue
+            ar = AreaState(
+                area=area_num,
+                name=a.get("name", ""),
+                preset_count=int(a.get("preset_count", 4)),
+                fade_tenths=int(a.get("fade_tenths", 20)),
+                area_type=a.get("area_type", AREA_TYPE_LIGHT),
+                has_pir=bool(a.get("has_pir", False)),
+                occ_enabled=bool(a.get("occ_enabled", True)),
+                curtains=a.get("curtains", []),
+                hvac_mode_area=int(a.get("hvac_mode_area", 0)),
+                hvac_mode_method=a.get("hvac_mode_method", ""  ),
+                hvac_mode_ch0=int(a.get("hvac_mode_ch0", 0)),
+                hvac_mode_map=a.get("hvac_mode_map", {}),
+                hvac_fan_area=int(a.get("hvac_fan_area", 0)),
+                hvac_fan_method=a.get("hvac_fan_method", ""),
+                hvac_fan_ch0=int(a.get("hvac_fan_ch0", 0)),
+                hvac_fan_map=a.get("hvac_fan_map", {}),
+                setpt_step=float(a.get("setpt_step", 0.5)),
+                has_temp=bool(a.get("has_temp", False)),
+                preset_names={int(k): v for k, v in a.get("preset_names", {}).items()},
+            )
+            for c in a.get("channels", []):
+                ch0 = c.get("ch0")
+                if ch0 is None:
+                    continue
+                if "channel_type" in c:
+                    ch_type = c["channel_type"]
+                elif c.get("is_dimmable", True):
+                    ch_type = CHANNEL_TYPE_DIMMER
+                else:
+                    ch_type = CHANNEL_TYPE_ONOFF
+                partner = c.get("cover_partner_ch0")
+                ch = ChannelState(
+                    area=area_num,
+                    ch0=int(ch0),
+                    name=c.get("name", ""),
+                    channel_type=ch_type,
+                    cover_partner_ch0=int(partner) if partner is not None else None,
+                )
+                ar.channels[ch.ch0] = ch
+            coord.areas[area_num] = ar
+        LOGGER.info("[WS] restore logical: %d areas loaded", len(coord.areas))
+
+    else:  # physical
+        # ── Re-populate devices from backup ───────────────────────────────────
+        from .coordinator import PhysicalDevice  # noqa: PLC0415
+        from .const import DEVICE_NAMES          # noqa: PLC0415
+        coord.devices.clear()
+        for d in backup.get("devices", []):
+            code = d.get("device_code")
+            box  = d.get("box_number")
+            if code is None or box is None:
+                continue
+            model = DEVICE_NAMES.get(int(code), f"Device 0x{int(code):02X}")
+            coord.devices[(int(code), int(box))] = PhysicalDevice(
+                device_code=int(code),
+                box_number=int(box),
+                model=model,
+                name=d.get("name", ""),
+                has_lux=bool(d.get("has_lux", False)),
+                has_motion=bool(d.get("has_motion", False)),
+            )
+        if "signon_interval" in backup:
+            coord.signon_interval = int(backup["signon_interval"])
+        LOGGER.info("[WS] restore physical: %d devices loaded", len(coord.devices))
+
+    # ── Persist and reload ────────────────────────────────────────────────────
+    if coord._storage:  # noqa: SLF001
+        await coord._storage.async_save(coord)  # noqa: SLF001
+
+    connection.send_result(msg["id"], {"ok": True, "reloading": True})
+
+    # Reload the config entry so all entities are recreated cleanly
+    hass.async_create_task(hass.config_entries.async_reload(msg["entry_id"]))
+    LOGGER.info("[WS] restore_backup complete: section=%s — reloading entry", section)

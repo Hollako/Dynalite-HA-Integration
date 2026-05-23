@@ -394,6 +394,9 @@ class DynaliteConfigPanel extends HTMLElement {
             <button class="dp-btn dp-btn-primary" id="dp-add-device-btn">＋ Add Device</button>
             <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-physical">📂 Import XML</button>
             <button class="dp-btn dp-btn-neutral" id="dp-signon-btn">📡 Send Sign-on</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-backup-physical">⬇ Backup</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-restore-physical-btn">⬆ Restore</button>
+            <input type="file" id="dp-restore-physical-file" accept=".json" style="display:none;">
             <button class="dp-btn dp-btn-neutral" id="dp-refresh-devices">↻ Refresh</button>
           </div>
           <!-- Logical tab buttons (visible when logical tab active) -->
@@ -401,6 +404,9 @@ class DynaliteConfigPanel extends HTMLElement {
             <button class="dp-btn dp-btn-primary" id="dp-scan-btn">⟳ Initial Scan</button>
             <button class="dp-btn dp-btn-primary" id="dp-add-area-btn">＋ Define New Area</button>
             <button class="dp-btn dp-btn-neutral" id="dp-xml-btn-logical">📂 Import XML</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-backup-logical">⬇ Backup</button>
+            <button class="dp-btn dp-btn-neutral" id="dp-restore-logical-btn">⬆ Restore</button>
+            <input type="file" id="dp-restore-logical-file" accept=".json" style="display:none;">
             <button class="dp-btn dp-btn-neutral" id="dp-refresh-logical">↻ Refresh</button>
             <button class="dp-btn dp-btn-save-all" id="dp-save-all-btn" style="display:none;">💾 Save All Changes</button>
           </div>
@@ -576,6 +582,12 @@ class DynaliteConfigPanel extends HTMLElement {
     });
 
     this.querySelector("#dp-refresh-devices").addEventListener("click", () => this._reloadDevices());
+
+    this.querySelector("#dp-backup-physical").addEventListener("click", () => this._doBackup("physical"));
+    this.querySelector("#dp-restore-physical-btn").addEventListener("click", () => {
+      this.querySelector("#dp-restore-physical-file").click();
+    });
+    this.querySelector("#dp-restore-physical-file").addEventListener("change", e => this._doRestore("physical", e));
 
     this.querySelector("#dp-signon-btn").addEventListener("click", () => {
       const btn = this.querySelector("#dp-signon-btn");
@@ -884,6 +896,12 @@ class DynaliteConfigPanel extends HTMLElement {
     this.querySelector("#dp-scan-btn").addEventListener("click",        () => this._openScanModal());
     this.querySelector("#dp-save-all-btn").addEventListener("click",    () => this._saveAllChanges());
     this.querySelector("#dp-refresh-logical").addEventListener("click", () => this._reloadAreas().catch(() => {}));
+
+    this.querySelector("#dp-backup-logical").addEventListener("click", () => this._doBackup("logical"));
+    this.querySelector("#dp-restore-logical-btn").addEventListener("click", () => {
+      this.querySelector("#dp-restore-logical-file").click();
+    });
+    this.querySelector("#dp-restore-logical-file").addEventListener("change", e => this._doRestore("logical", e));
 
     // ── Scan modal wiring ──────────────────────────────────────────────────────
     const modal   = this.querySelector("#dp-scan-modal");
@@ -1958,6 +1976,75 @@ class DynaliteConfigPanel extends HTMLElement {
       this._showMsg(msg);
       await this._reloadDevices();
     } catch (e) { this._showMsg("Import failed: " + e.message, true); }
+  }
+
+  // ── Backup / Restore ────────────────────────────────────────────────────────
+
+  async _doBackup(section) {
+    try {
+      const r    = await this._ws("dynalite_pdeg/get_backup", { section });
+      const json = JSON.stringify(r, null, 2);
+      const ts   = (r.timestamp || new Date().toISOString()).replace(/[T:]/g, "-").slice(0, 19);
+      const name = `dynalite-${section}-backup-${ts}.json`;
+      const blob = new Blob([json], { type: "application/json" });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
+      const count = section === "logical"
+        ? `${(r.areas   || []).length} area(s)`
+        : `${(r.devices || []).length} device(s)`;
+      this._showMsg(`Backup downloaded: ${name}  (${count})`);
+    } catch (e) {
+      this._showMsg("Backup failed: " + e.message, true);
+    }
+  }
+
+  async _doRestore(section, event) {
+    const file = event.target.files[0];
+    event.target.value = "";   // reset so the same file can be re-selected
+    if (!file) return;
+
+    let data;
+    try {
+      const text = await file.text();
+      data = JSON.parse(text);
+    } catch {
+      this._showMsg("Could not parse backup file — must be a valid JSON file.", true);
+      return;
+    }
+
+    if (data.version !== 1) {
+      this._showMsg("Unsupported backup version.", true);
+      return;
+    }
+    if (data.section && data.section !== section) {
+      this._showMsg(
+        `Wrong backup section: file is '${data.section}', expected '${section}'.`, true
+      );
+      return;
+    }
+
+    const count = section === "logical"
+      ? `${(data.areas   || []).length} area(s)`
+      : `${(data.devices || []).length} device(s)`;
+
+    if (!confirm(
+      `Restore ${section} configuration?\n\n` +
+      `This will replace all current ${section} data with the backup (${count}).\n` +
+      `The integration will reload automatically.`
+    )) return;
+
+    try {
+      await this._ws("dynalite_pdeg/restore_backup", { section, data });
+      this._showMsg(`${section.charAt(0).toUpperCase() + section.slice(1)} restore complete — integration reloading…`);
+      setTimeout(() => {
+        if (section === "physical") this._reloadDevices().catch(() => {});
+        else this._reloadAreas().catch(() => {});
+      }, 8000);
+    } catch (e) {
+      this._showMsg("Restore failed: " + e.message, true);
+    }
   }
 }
 

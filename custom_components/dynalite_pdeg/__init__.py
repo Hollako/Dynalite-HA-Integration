@@ -55,11 +55,41 @@ async def async_setup_entry(
     if not await coordinator.async_setup():
         raise ConfigEntryNotReady("Unable to start Dynalite coordinator")
 
-    # ── Remove legacy setpoint sensor entities (setpoint now lives in climate) ──
+    # ── Remove orphaned entities/devices from a previous host IP ─────────────
+    # When the PDEG IP address changes, unique_ids and device identifiers built
+    # from the old IP are left behind.  Purge them here so there are no
+    # duplicates after a reconfiguration.
     from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
     ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    current_host = entry.data[CONF_HOST]
+    host_prefix  = f"{current_host}_"
+
+    # Entities — our unique_ids always start with "{host}_"
+    for ent in list(er.async_entries_for_config_entry(ent_reg, entry.entry_id)):
+        uid = ent.unique_id or ""
+        if uid and not uid.startswith(host_prefix):
+            ent_reg.async_remove(ent.entity_id)
+            LOGGER.info("[Cleanup] removed orphaned entity %s (old host)", ent.entity_id)
+
+    # Physical devices — identifiers: (DOMAIN, "{host}_{dc}_{bn}") or (DOMAIN, "{host}_device_…")
+    # Keep: "gateway" and "area_*" identifiers (not IP-based)
+    for dev in list(dr.async_entries_for_config_entry(dev_reg, entry.entry_id)):
+        for domain, ident in dev.identifiers:
+            if domain != DOMAIN:
+                continue
+            if ident == "gateway" or ident.startswith("area_"):
+                continue
+            # Physical device identifier uses old host
+            if not ident.startswith(host_prefix):
+                dev_reg.async_remove_device(dev.id)
+                LOGGER.info("[Cleanup] removed orphaned device '%s' (old host)", dev.name)
+                break
+
+    # Legacy: remove old setpoint sensor entities
     for area_num in coordinator.areas:
-        uid = f"{entry.data[CONF_HOST]}_a{area_num}_setpt"
+        uid = f"{current_host}_a{area_num}_setpt"
         entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, uid)
         if entity_id:
             ent_reg.async_remove(entity_id)
@@ -92,7 +122,7 @@ async def async_setup_entry(
             sidebar_title=entry.data.get("name", "Dynalite"),
             sidebar_icon="mdi:lightbulb-group",
             frontend_url_path=panel_url,
-            js_url=f"{static_url}/dynalite-config-panel.js?v=81",
+            js_url=f"{static_url}/dynalite-config-panel.js?v=82",
             config={"entry_id": entry.entry_id, "name": entry.data.get("name", "Dynalite PDEG")},
             require_admin=True,
         )
