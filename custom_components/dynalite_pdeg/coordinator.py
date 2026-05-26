@@ -172,6 +172,15 @@ class DynaliteCoordinator:
         # channel for a few seconds so bus poll responses can't overwrite the
         # optimistic state we just pushed.
         self._ch_protected: dict[tuple[int, int], float] = {}
+        # Tracks the monotonic time at which _poll_channels last successfully
+        # sent at least one request_level for each area.  Used by
+        # _poll_channels_forced to skip the forced pass when a normal poll
+        # already ran (avoids duplicate requests on hardware that echoes TX
+        # frames and also sends a 0x62 reply within a few ms of each other).
+        # Areas for which a _poll_channels coroutine is already in-flight.
+        # Prevents a second near-simultaneous trigger (e.g. TX echo + 0x62
+        # reply arriving 6 ms apart) from running a duplicate poll.
+        self._poll_pending: set[int] = set()
         self.client = DynaliteClient(
             host, port,
             self._on_frame,
@@ -326,6 +335,7 @@ class DynaliteCoordinator:
             # OP_PRESET_REPORT confirmation, which may never arrive for passive traffic.
             ar = self._touch_area(area_num)
             ar.preset0 = preset0
+            self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             self._forward_hvac_signal(area_num)
             asyncio.ensure_future(self._poll_channels(area_num))
@@ -430,12 +440,20 @@ class DynaliteCoordinator:
             preset0 = b[5] * 8 + b[2]   # absolute 0-based preset index
             ar = self._touch_area(area_num)
             ar.preset0 = preset0
+            self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area_num), ar)
             # Also notify any HVAC area whose mode/fan is preset-controlled from this area
             self._forward_hvac_signal(area_num)
             LOGGER.debug("[A%d] preset → %d (bank %d)", area_num, preset0 + 1, b[5])
             # Preset changed from any source (HA, System Builder, panel) —
             # poll channel levels so HA reflects the new state immediately.
+            # Clear per-channel protection first: some hardware (e.g. keypads that
+            # send 0x6B per channel) sets protection on every channel just before
+            # the 0x62 confirmation arrives.  Without clearing it, _poll_channels
+            # would find every channel protected and silently skip the entire poll.
+            keys_to_clear = [k for k in self._ch_protected if k[0] == area_num]
+            for k in keys_to_clear:
+                del self._ch_protected[k]
             asyncio.ensure_future(self._poll_channels(area_num))
 
         elif opcode == OP_LEVEL_REPORT:
@@ -917,13 +935,19 @@ class DynaliteCoordinator:
         # preset/mode before the bus round-trip comes back.
         if ar is not None:
             ar.preset0 = preset1 - 1
+            self.schedule_save()
             async_dispatcher_send(self.hass, signal_area(area), ar)
             # Notify any HVAC area that uses this area as its mode/fan control area
             self._forward_hvac_signal(area)
-        # Still request confirmation; the OP_PRESET_REPORT reply will also
-        # trigger a channel-level poll via _poll_channels().
+        # Request confirmation so the 0x62 reply also triggers _poll_channels.
         await asyncio.sleep(0.1)
         await self.client.request_area_preset(area)
+        # Schedule a poll with a longer settle (500ms) so any 0x6B burst from
+        # the controller completes before we clear protection and poll.
+        # On areas that echo TX frames, _poll_channels is already in-flight
+        # (triggered by the echo) and _poll_pending coalesces this call away.
+        # On areas that don't echo (e.g. area 12/13), this is the only poll.
+        asyncio.ensure_future(self._poll_channels(area, settle=0.5))
 
     async def _poll_single_channel(self, area: int, ch0: int) -> None:
         """Request the level of one specific channel after a short settle."""
@@ -931,44 +955,59 @@ class DynaliteCoordinator:
         if self.client.connected:
             await self.client.request_level(area, ch0)
 
-    async def _poll_channels(self, area: int) -> None:
+    async def _poll_channels(self, area: int, settle: float = 0.2) -> None:
         """Request the current level of every known channel in an area.
 
-        Called whenever a preset report arrives (from any source).  We read the
-        target level (b[4]) so results are valid even mid-fade — no need to wait
-        for the fade to complete.  A short 0.2 s settle lets the bus process the
-        preset command before we start asking for levels.
+        settle: seconds to wait before polling.
+          - 0.2s (default) for bus-triggered polls (echo / 0x62 reply) — quick
+            settle lets the bus process the preset command.
+          - 0.5s when called from cmd_select_preset — long enough for any 0x6B
+            burst from the controller to complete before we clear protection.
 
-        Channels that are currently protected (recently updated by a 0x6B
-        optimistic command) are skipped — their state is already correct and
-        polling them would only generate spurious bus traffic from virtual
-        channels (which have no physical hardware to reply with a real level).
+        Concurrent triggers for the same area are coalesced: the second call
+        returns immediately if a poll is already in-flight.  This prevents
+        duplicate requests when both a TX echo and a 0x62 reply arrive within
+        a few ms of each other.
+
+        After settling, all 0x6B protection for the area is cleared so that
+        every channel is polled unconditionally and the bus responses are
+        accepted (not suppressed by stale protection).
         """
-        await asyncio.sleep(0.2)
-        ar = self.areas.get(area)
-        if not ar or not ar.channels:
-            return
-        now = time.monotonic()
-        to_poll = [
-            ch0 for ch0 in sorted(ar.channels)
-            if self._ch_protected.get((area, ch0), 0.0) <= now
-        ]
-        if not to_poll:
+        LOGGER.debug("[Coordinator] _poll_channels called: A%d settle=%.1fs pending=%s", area, settle, area in self._poll_pending)
+        # Coalesce concurrent triggers (e.g. TX echo + 0x62 arriving ms apart,
+        # or the cmd_select_preset 0.5s poll arriving while the echo-triggered
+        # poll is still in-flight).
+        # asyncio is single-threaded: by the time the second coroutine starts
+        # the first has already added itself to _poll_pending.
+        if area in self._poll_pending:
             LOGGER.debug(
-                "[Coordinator] poll skipped: A%d — all %d channel(s) protected",
-                area, len(ar.channels),
+                "[Coordinator] poll coalesced: A%d — another poll already in-flight",
+                area,
             )
             return
-        skipped = len(ar.channels) - len(to_poll)
-        LOGGER.debug(
-            "[Coordinator] polling channels: A%d (%d channels%s)",
-            area, len(to_poll),
-            f", {skipped} protected/skipped" if skipped else "",
-        )
-        for ch0 in to_poll:
-            if self.client.connected:
+        self._poll_pending.add(area)
+        try:
+            await asyncio.sleep(settle)
+            ar = self.areas.get(area)
+            if not ar or not ar.channels:
+                LOGGER.debug("[Coordinator] poll skipped: A%d — no channels configured", area)
+                return
+            # Clear any 0x6B protection so every channel is polled and its
+            # response is accepted.  The settle above ensures the 0x6B burst
+            # has finished before we start clearing and requesting levels.
+            keys = [k for k in self._ch_protected if k[0] == area]
+            for k in keys:
+                del self._ch_protected[k]
+            LOGGER.debug(
+                "[Coordinator] polling channels: A%d (%d channels)", area, len(ar.channels)
+            )
+            for ch0 in sorted(ar.channels):
+                if not self.client.connected:
+                    break
                 await self.client.request_level(area, ch0)
                 await asyncio.sleep(0.05)
+        finally:
+            self._poll_pending.discard(area)
 
     async def cmd_set_level(
         self, area: int, ch0: int, pct: int, fade_tenths: int | None = None

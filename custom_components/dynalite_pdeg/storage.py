@@ -102,6 +102,7 @@ class DynaliteStorage:
                 hvac_fan_map=a.get("hvac_fan_map", {}),
                 setpt_step=float(a.get("setpt_step", 0.5)),
                 has_temp=bool(a.get("has_temp", False)),
+                preset0=int(a.get("preset0", 0xFF)),
                 preset_names={int(k): v for k, v in a.get("preset_names", {}).items()},
             )
 
@@ -210,6 +211,7 @@ class DynaliteStorage:
                     "hvac_fan_map":     ar.hvac_fan_map,
                     "setpt_step":       ar.setpt_step,
                     "has_temp":         ar.has_temp,
+                    "preset0":          ar.preset0,
                     "preset_names":     {str(k): v for k, v in ar.preset_names.items()},
                     "channels": channels,
                 }
