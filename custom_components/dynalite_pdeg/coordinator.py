@@ -688,8 +688,8 @@ class DynaliteCoordinator:
                 # Lux sub-type: b[5] = high byte (256 lux/unit), b[6] = low byte
                 lux = b[5] * 256 + b[6]
                 dev.lux_value = float(lux)
-                # Auto-enable the lux sensor the first time a reading arrives (D5 Sensor only)
-                if not dev.has_lux and device_code == 0xB3:
+                # Auto-enable the lux sensor the first time a D3/D4/D5 sensor reports a reading.
+                if not dev.has_lux and device_code in SENSOR_DEVICE_CODES:
                     dev.has_lux = True
                     for cb in self.on_new_lux_cbs:
                         cb()

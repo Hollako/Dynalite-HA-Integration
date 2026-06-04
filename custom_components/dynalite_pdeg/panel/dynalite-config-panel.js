@@ -610,12 +610,12 @@ class DynaliteConfigPanel extends HTMLElement {
       const raw = inp.value.trim();
       let boxNumbers;
       if (raw === "") {
-        // Blank → poll all known D5 Sensors (0xB3)
+        // Blank → poll all known D3/D4/D5 Sensors (0xB1-0xB3)
         boxNumbers = this._devices
-          .filter(d => d.device_code === 0xB3)
+          .filter(d => [0xB1, 0xB2, 0xB3].includes(d.device_code))
           .map(d => d.box_number);
         if (boxNumbers.length === 0) {
-          this._showMsg("No D5 Sensors found in device list.", true);
+          this._showMsg("No D3/D4/D5 Sensors found in device list.", true);
           return;
         }
       } else {
@@ -803,7 +803,7 @@ class DynaliteConfigPanel extends HTMLElement {
           Code: 0x${dev.device_code.toString(16).toUpperCase().padStart(2,"0")}
           <br>${lastSeenTxt}
         </div>
-        ${dev.device_code === 0xB3 ? `
+        ${[0xB1, 0xB2, 0xB3].includes(dev.device_code) ? `
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;">
           <button class="dp-btn dp-btn-sm dp-dev-lux" style="
                   background:${dev.has_lux ? "#43a047" : "#9e9e9e"};color:#fff;"
