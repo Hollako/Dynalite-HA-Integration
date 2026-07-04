@@ -151,7 +151,7 @@ class DynaliteDeviceConnectivity(BinarySensorEntity):
             name         = dev_name,
             manufacturer = "Philips Dynalite",
             model        = self._model,
-            via_device   = (DOMAIN, "gateway"),
+            via_device   = (DOMAIN, f"{coordinator.host}_gateway"),
         )
 
     @property
@@ -179,14 +179,14 @@ class DynaliteDeviceConnectivity(BinarySensorEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_device(self._device_code, self._box_number),
+                signal_device(self._coordinator.host, self._device_code, self._box_number),
                 self._on_device_update,
             )
         )
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_connection(),
+                signal_connection(self._coordinator.host),
                 self._on_connection,
             )
         )
@@ -227,7 +227,7 @@ class DynaliteDeviceMotionSensor(BinarySensorEntity):
             name         = dev_name,
             manufacturer = "Philips Dynalite",
             model        = model,
-            via_device   = (DOMAIN, "gateway"),
+            via_device   = (DOMAIN, f"{coordinator.host}_gateway"),
         )
 
     @property
@@ -252,14 +252,14 @@ class DynaliteDeviceMotionSensor(BinarySensorEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_device_motion(self._device_code, self._box_number),
+                signal_device_motion(self._coordinator.host, self._device_code, self._box_number),
                 self._on_motion_update,
             )
         )
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_connection(),
+                signal_connection(self._coordinator.host),
                 self._on_connection,
             )
         )

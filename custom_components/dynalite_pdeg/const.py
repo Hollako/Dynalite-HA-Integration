@@ -4,7 +4,7 @@ import logging
 DOMAIN = "dynalite_pdeg"
 LOGGER = logging.getLogger(__package__)
 
-DEFAULT_PORT = 12345
+DEFAULT_PORT = 50000
 DEFAULT_NAME = "Dynalite"
 RECONNECT_DELAY          = 5      # seconds between reconnect attempts
 SIGNON_INTERVAL          = 3600   # default seconds between targeted sign-on polls (configurable)
@@ -81,26 +81,29 @@ def pct_to_ha_brightness(pct: int) -> int:
     return int(round(pct * 255 / 100))
 
 # ── Dispatcher signal helpers ────────────────────────────────────────────────
-def signal_channel(area: int, ch0: int) -> str:
-    return f"{DOMAIN}_ch_{area}_{ch0}"
+# Every signal is namespaced by the gateway (its host/IP) so that multiple PDEG
+# gateways sharing the same Dynalite area/channel/device numbers do not cross-talk.
+# `ns` is the owning coordinator's host — see DynaliteCoordinator.host.
+def signal_channel(ns: str, area: int, ch0: int) -> str:
+    return f"{DOMAIN}_ch_{ns}_{area}_{ch0}"
 
-def signal_area(area: int) -> str:
-    return f"{DOMAIN}_area_{area}"
+def signal_area(ns: str, area: int) -> str:
+    return f"{DOMAIN}_area_{ns}_{area}"
 
-def signal_connection() -> str:
-    return f"{DOMAIN}_connected"
+def signal_connection(ns: str) -> str:
+    return f"{DOMAIN}_connected_{ns}"
 
-def signal_device(device_code: int, box_number: int) -> str:
-    return f"{DOMAIN}_device_{device_code}_{box_number}"
+def signal_device(ns: str, device_code: int, box_number: int) -> str:
+    return f"{DOMAIN}_device_{ns}_{device_code}_{box_number}"
 
-def signal_lux(device_code: int, box_number: int) -> str:
-    return f"{DOMAIN}_lux_{device_code}_{box_number}"
+def signal_lux(ns: str, device_code: int, box_number: int) -> str:
+    return f"{DOMAIN}_lux_{ns}_{device_code}_{box_number}"
 
-def signal_channel_remove(area: int, ch0: int) -> str:
-    return f"{DOMAIN}_ch_remove_{area}_{ch0}"
+def signal_channel_remove(ns: str, area: int, ch0: int) -> str:
+    return f"{DOMAIN}_ch_remove_{ns}_{area}_{ch0}"
 
-def signal_device_motion(device_code: int, box_number: int) -> str:
-    return f"{DOMAIN}_device_motion_{device_code}_{box_number}"
+def signal_device_motion(ns: str, device_code: int, box_number: int) -> str:
+    return f"{DOMAIN}_device_motion_{ns}_{device_code}_{box_number}"
 
 # ── Config entry keys ────────────────────────────────────────────────────────
 CONF_HOST       = "host"

@@ -31,14 +31,15 @@ class DynaliteEntity(Entity):
 
     @property
     def device_info(self) -> DeviceInfo:
+        host = self._coordinator.host
         ar = self._coordinator.areas.get(self._area)
         area_name = ar.display_name() if ar else f"Area {self._area}"
         return DeviceInfo(
-            identifiers={(DOMAIN, f"area_{self._area}")},
+            identifiers={(DOMAIN, f"{host}_area_{self._area}")},
             name=area_name,
             manufacturer="Philips Dynalite",
             model=f"Area {self._area}",
-            via_device=(DOMAIN, "gateway"),
+            via_device=(DOMAIN, f"{host}_gateway"),
         )
 
     # ── Availability ──────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ class DynaliteEntity(Entity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_connection(),
+                signal_connection(self._coordinator.host),
                 self._on_connection,
             )
         )
@@ -79,7 +80,7 @@ class DynaliteAreaEntity(DynaliteEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_area(self._area),
+                signal_area(self._coordinator.host, self._area),
                 self._on_area_update,
             )
         )
@@ -104,14 +105,14 @@ class DynaliteChannelEntity(DynaliteEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_channel(self._area, self._ch0),
+                signal_channel(self._coordinator.host, self._area, self._ch0),
                 self._on_channel_update,
             )
         )
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_channel_remove(self._area, self._ch0),
+                signal_channel_remove(self._coordinator.host, self._area, self._ch0),
                 self._on_channel_remove,
             )
         )

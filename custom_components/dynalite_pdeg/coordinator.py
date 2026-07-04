@@ -234,7 +234,7 @@ class DynaliteCoordinator:
             # permanently stuck as occupied until the next vacancy event.
             for ar in self.areas.values():
                 ar.pir_occupied = False
-        async_dispatcher_send(self.hass, signal_connection(), connected)
+        async_dispatcher_send(self.hass, signal_connection(self.host), connected)
         if connected:
             asyncio.ensure_future(self._reconnect_sequence())
 
@@ -336,7 +336,7 @@ class DynaliteCoordinator:
             ar = self._touch_area(area_num)
             ar.preset0 = preset0
             self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             self._forward_hvac_signal(area_num)
             asyncio.ensure_future(self._poll_channels(area_num))
             return
@@ -384,7 +384,7 @@ class DynaliteCoordinator:
                 preset1, preset_label, is_off,
             )
 
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             self._forward_hvac_signal(area_num)
 
             # ── Direct optimistic update for the named channel ────────────────
@@ -393,14 +393,14 @@ class DynaliteCoordinator:
                 ch       = self._touch_channel(ar, ch_raw)
                 ch.pct   = 0 if is_off else 100
                 ch.is_on = not is_off
-                async_dispatcher_send(self.hass, signal_channel(area_num, ch_raw), ch)
+                async_dispatcher_send(self.hass, signal_channel(self.host,area_num, ch_raw), ch)
                 self._ch_protected[(area_num, ch_raw)] = _protect_until
             else:
                 # Broadcast (all channels in area) — update all known channels
                 for ch in ar.channels.values():
                     ch.pct   = 0 if is_off else 100
                     ch.is_on = not is_off
-                    async_dispatcher_send(self.hass, signal_channel(area_num, ch.ch0), ch)
+                    async_dispatcher_send(self.hass, signal_channel(self.host,area_num, ch.ch0), ch)
                     self._ch_protected[(area_num, ch.ch0)] = _protect_until
 
             # ── No poll here ─────────────────────────────────────────────────
@@ -441,7 +441,7 @@ class DynaliteCoordinator:
             ar = self._touch_area(area_num)
             ar.preset0 = preset0
             self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             # Also notify any HVAC area whose mode/fan is preset-controlled from this area
             self._forward_hvac_signal(area_num)
             LOGGER.debug("[A%d] preset → %d (bank %d)", area_num, preset0 + 1, b[5])
@@ -482,7 +482,7 @@ class DynaliteCoordinator:
 
             ch.pct   = pct
             ch.is_on = pct > 0
-            async_dispatcher_send(self.hass, signal_channel(area_num, ch0), ch)
+            async_dispatcher_send(self.hass, signal_channel(self.host,area_num, ch0), ch)
             LOGGER.debug("[A%d Ch%d] level %d%%", area_num, ch0 + 1, pct)
             # Refresh any HVAC climate entity whose mode/fan channel just changed.
             # Covers both same-area and cross-area control configurations.
@@ -493,7 +493,7 @@ class DynaliteCoordinator:
                     (hvac_ar.hvac_mode_method == "channel" and eff_mode == area_num and hvac_ar.hvac_mode_ch0 == ch0) or
                     (hvac_ar.hvac_fan_method  == "channel" and eff_fan  == area_num and hvac_ar.hvac_fan_ch0  == ch0)
                 ):
-                    async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
+                    async_dispatcher_send(self.hass, signal_area(self.host,hvac_ar.area), hvac_ar)
 
         elif opcode == OP_OCCUPANCY:
             ar = self._touch_area(area_num)
@@ -501,7 +501,7 @@ class DynaliteCoordinator:
                 # b[2]=0xFF (All Channels) → occupancy detection control
                 # b[5]=1 Resume (enable), b[5]=0 Suspend (disable)
                 ar.occ_enabled = b[5] == 1
-                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
                 LOGGER.debug("[A%d] 0x31 occupancy detection %s",
                              area_num, "resumed" if ar.occ_enabled else "suspended")
             else:
@@ -515,18 +515,18 @@ class DynaliteCoordinator:
                     for cb in self.on_new_pir_cbs:
                         cb()
                     self.schedule_save()
-                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
                 LOGGER.debug("[A%d] 0x31 PIR → %s", area_num, "occupied" if occupied else "vacant")
 
         elif opcode == OP_OCC_ENABLE:
             ar = self._touch_area(area_num)
             ar.occ_enabled = True
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
 
         elif opcode == OP_OCC_DISABLE:
             ar = self._touch_area(area_num)
             ar.occ_enabled = False
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
 
         elif opcode == OP_MOTION_DETECT:
             # Instantaneous motion trigger (0x2E).
@@ -542,14 +542,14 @@ class DynaliteCoordinator:
                 for cb in self.on_new_pir_cbs:
                     cb()
                 self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             LOGGER.debug("[A%d] 0x2E motion trigger  ch=%s", area_num, ch_label)
 
         elif opcode == OP_VACANT:
             # Custom vacant signal (0x3E) — area is now unoccupied.
             ar = self._touch_area(area_num)
             ar.pir_occupied = False
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             LOGGER.debug("[A%d] 0x3E vacant signal received", area_num)
 
         elif opcode == OP_TEMP_REPORT:
@@ -571,7 +571,7 @@ class DynaliteCoordinator:
                         for cb in self.on_new_climate_cbs:
                             cb()
                     self.schedule_save()
-                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
                 LOGGER.debug("[A%d] setpt %.2f°C (0x4A/0x0D reply)", area_num, ar.setpt_c)
             else:
                 # ── Current temperature reply (b[2]=0x0C or spontaneous) ─────
@@ -583,7 +583,7 @@ class DynaliteCoordinator:
                         cb()
                     self.schedule_save()
                     LOGGER.info("[A%d] temperature sensor auto-enabled (0x4A)", area_num)
-                async_dispatcher_send(self.hass, signal_area(area_num), ar)
+                async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
                 LOGGER.debug("[A%d] temp %.2f°C (0x4A)", area_num, ar.temp_c)
 
         elif opcode == OP_TEMP_REPORT_ALT:
@@ -597,7 +597,7 @@ class DynaliteCoordinator:
                     cb()
                 self.schedule_save()
                 LOGGER.info("[A%d] temperature sensor auto-enabled (0xF6)", area_num)
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             LOGGER.debug("[A%d] temp %.2f°C (0xF6/Q2)", area_num, ar.temp_c)
 
         elif opcode == OP_SET_SETPOINT:
@@ -621,7 +621,7 @@ class DynaliteCoordinator:
                     for cb in self.on_new_climate_cbs:
                         cb()
                 self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area_num), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area_num), ar)
             LOGGER.debug("[A%d] setpt %.1f°C (0x48 from keypad/controller)", area_num, ar.setpt_c)
 
     def _schedule_signon_recheck(self) -> None:
@@ -680,7 +680,7 @@ class DynaliteCoordinator:
                     LOGGER.info("[Device 0x%02X box %d] motion sensor auto-enabled",
                                 device_code, box_number)
                 async_dispatcher_send(
-                    self.hass, signal_device_motion(device_code, box_number), detected
+                    self.hass, signal_device_motion(self.host,device_code, box_number), detected
                 )
                 LOGGER.debug("[Device 0x%02X box %d] motion → %s",
                              device_code, box_number, "detected" if detected else "vacant")
@@ -696,7 +696,7 @@ class DynaliteCoordinator:
                     self.schedule_save()
                     LOGGER.info("[Device 0x%02X box %d] lux sensor auto-enabled (%d lx)",
                                 device_code, box_number, lux)
-                async_dispatcher_send(self.hass, signal_lux(device_code, box_number))
+                async_dispatcher_send(self.hass, signal_lux(self.host,device_code, box_number))
                 LOGGER.debug("[Device 0x%02X box %d] lux = %d lx (hi=%d lo=%d)",
                              device_code, box_number, lux, b[5], b[6])
             return
@@ -748,7 +748,7 @@ class DynaliteCoordinator:
             self._schedule_signon_recheck()
 
         if not was_online:
-            async_dispatcher_send(self.hass, signal_device(device_code, box_number), True)
+            async_dispatcher_send(self.hass, signal_device(self.host,device_code, box_number), True)
             if not is_new:
                 LOGGER.info("[Sign-on] back online: %s  box %d%s", model, box_number, fw_str)
 
@@ -863,7 +863,7 @@ class DynaliteCoordinator:
                     "[Sign-on] OFFLINE (no reply after %d attempts): %s  box %d",
                     SIGNON_RETRIES, model, bn,
                 )
-                async_dispatcher_send(self.hass, signal_device(dc, bn), False)
+                async_dispatcher_send(self.hass, signal_device(self.host,dc, bn), False)
 
         online_count  = sum(1 for v in self.device_online.values() if v)
         offline_count = sum(1 for v in self.device_online.values() if not v)
@@ -923,7 +923,7 @@ class DynaliteCoordinator:
             eff_mode = hvac_ar.hvac_mode_area or hvac_ar.area
             eff_fan  = hvac_ar.hvac_fan_area  or hvac_ar.area
             if eff_mode == control_area_num or eff_fan == control_area_num:
-                async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
+                async_dispatcher_send(self.hass, signal_area(self.host,hvac_ar.area), hvac_ar)
 
     # ── Command passthrough (called by HA entities) ───────────────────────────
 
@@ -936,7 +936,7 @@ class DynaliteCoordinator:
         if ar is not None:
             ar.preset0 = preset1 - 1
             self.schedule_save()
-            async_dispatcher_send(self.hass, signal_area(area), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area), ar)
             # Notify any HVAC area that uses this area as its mode/fan control area
             self._forward_hvac_signal(area)
         # Request confirmation so the 0x62 reply also triggers _poll_channels.
@@ -1036,7 +1036,7 @@ class DynaliteCoordinator:
             ch = self._touch_channel(ar, ch0)
             ch.pct   = pct
             ch.is_on = pct > 0
-            async_dispatcher_send(self.hass, signal_channel(area, ch0), ch)
+            async_dispatcher_send(self.hass, signal_channel(self.host,area, ch0), ch)
             # Refresh any HVAC climate entity whose mode/fan channel just changed.
             # Covers both same-area (hvac_mode_area==0) and cross-area configs.
             for hvac_ar in self.areas.values():
@@ -1046,7 +1046,7 @@ class DynaliteCoordinator:
                     (hvac_ar.hvac_mode_method == "channel" and eff_mode == area and hvac_ar.hvac_mode_ch0 == ch0) or
                     (hvac_ar.hvac_fan_method  == "channel" and eff_fan  == area and hvac_ar.hvac_fan_ch0  == ch0)
                 ):
-                    async_dispatcher_send(self.hass, signal_area(hvac_ar.area), hvac_ar)
+                    async_dispatcher_send(self.hass, signal_area(self.host,hvac_ar.area), hvac_ar)
 
     async def async_scan(
         self,
@@ -1113,16 +1113,16 @@ class DynaliteCoordinator:
             ar.has_setpt = True
             ar.setpt_c   = temp_c
             from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
-            async_dispatcher_send(self.hass, signal_area(area), ar)
+            async_dispatcher_send(self.hass, signal_area(self.host,area), ar)
 
     async def cmd_occupancy_enable(self, area: int) -> None:
         await self.client.occupancy_enable(area)
         ar = self._touch_area(area)
         ar.occ_enabled = True
-        async_dispatcher_send(self.hass, signal_area(area), ar)
+        async_dispatcher_send(self.hass, signal_area(self.host,area), ar)
 
     async def cmd_occupancy_disable(self, area: int) -> None:
         await self.client.occupancy_disable(area)
         ar = self._touch_area(area)
         ar.occ_enabled = False
-        async_dispatcher_send(self.hass, signal_area(area), ar)
+        async_dispatcher_send(self.hass, signal_area(self.host,area), ar)

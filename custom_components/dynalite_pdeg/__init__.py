@@ -37,7 +37,7 @@ async def async_setup_entry(
     dev_reg = dr.async_get(hass)
     dev_reg.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, "gateway")},
+        identifiers={(DOMAIN, f"{entry.data[CONF_HOST]}_gateway")},
         name=entry.data.get("name", "Dynalite Gateway"),
         manufacturer="Philips Dynalite",
         model="PDEG",
@@ -73,15 +73,16 @@ async def async_setup_entry(
             ent_reg.async_remove(ent.entity_id)
             LOGGER.info("[Cleanup] removed orphaned entity %s (old host)", ent.entity_id)
 
-    # Physical devices — identifiers: (DOMAIN, "{host}_{dc}_{bn}") or (DOMAIN, "{host}_device_…")
-    # Keep: "gateway" and "area_*" identifiers (not IP-based)
+    # Devices — every identifier is now host-namespaced:
+    #   gateway:  "{host}_gateway"
+    #   area:     "{host}_area_{n}"
+    #   physical: "{host}_{dc}_{bn}"
+    # Anything not prefixed with the current host is stale — either from an old
+    # host IP or a pre-namespacing version (legacy "gateway"/"area_*") — so purge it.
     for dev in list(dr.async_entries_for_config_entry(dev_reg, entry.entry_id)):
         for domain, ident in dev.identifiers:
             if domain != DOMAIN:
                 continue
-            if ident == "gateway" or ident.startswith("area_"):
-                continue
-            # Physical device identifier uses old host
             if not ident.startswith(host_prefix):
                 dev_reg.async_remove_device(dev.id)
                 LOGGER.info("[Cleanup] removed orphaned device '%s' (old host)", dev.name)
@@ -122,7 +123,7 @@ async def async_setup_entry(
             sidebar_title=entry.data.get("name", "Dynalite"),
             sidebar_icon="mdi:lightbulb-group",
             frontend_url_path=panel_url,
-            js_url=f"{static_url}/dynalite-config-panel.js?v=82",
+            js_url=f"{static_url}/dynalite-config-panel.js?v=88",
             config={"entry_id": entry.entry_id, "name": entry.data.get("name", "Dynalite PDEG")},
             require_admin=True,
         )

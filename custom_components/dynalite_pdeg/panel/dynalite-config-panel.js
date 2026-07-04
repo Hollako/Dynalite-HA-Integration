@@ -43,6 +43,7 @@ class DynaliteConfigPanel extends HTMLElement {
     this._autoRefreshTimer    = null;
     this._dirtyAreas          = new Set();   // Set<areaNum> with unsaved area-level edits
     this._dirtyChannels       = new Map();   // Map<areaNum, Set<ch0>> with unsaved channel edits
+    this._search              = { physical: "", logical: "" };  // live filter text per tab
   }
 
   disconnectedCallback() {
@@ -86,6 +87,7 @@ class DynaliteConfigPanel extends HTMLElement {
     const btn = this.querySelector("#dp-menu-btn");
     if (btn) { btn.hass = this._hass; btn.narrow = this._narrow; }
     this._bindTabEvents();
+    this._bindSearchEvents();
     this._bindLogicalStaticEvents();
     this._bindXmlImportEvents();
     this._reload();
@@ -182,6 +184,58 @@ class DynaliteConfigPanel extends HTMLElement {
                     font-size: 13px; font-weight: 500; }
         .dp-ok   { background:#e8f5e9; color:#388e3c; }
         .dp-fail { background:#ffebee; color:#c62828; }
+
+        /* ── Physical toolbar (sign-on · motion · search in one row) ── */
+        .dp-phys-toolbar {
+          display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap;
+          margin-bottom: 16px; padding: 8px 14px; border-radius: 8px;
+          background: var(--secondary-background-color, #f5f5f5);
+        }
+        .dp-tool-item { display: flex; align-items: center; gap: 6px; }
+        .dp-tool-label { font-size: 13px; font-weight: 500; white-space: nowrap; }
+        /* In the toolbar the search wrapper must have NO margin, or the stray
+           bottom margin from .dp-search-wrap (defined later) offsets it inside
+           the centered flex row. !important beats that equal-specificity rule. */
+        .dp-tool-search { flex: 1 1 240px; margin: 0 !important; }
+        /* Give every control in the toolbar the same height so they line up
+           with the (taller) search pill. Height beats padding for sizing here. */
+        .dp-phys-toolbar input[type=text],
+        .dp-phys-toolbar input[type=number],
+        .dp-phys-toolbar .dp-btn {
+          height: 38px; box-sizing: border-box;
+        }
+        .dp-phys-toolbar .dp-btn {
+          display: inline-flex; align-items: center; justify-content: center;
+          min-width: 64px; padding-left: 16px; padding-right: 16px;
+        }
+
+        /* ── Search bar ── */
+        .dp-search-wrap { position: relative; margin-bottom: 16px; }
+        /* Selector is 2 classes so it outranks the global input[type=text] rule
+           (otherwise the icon overlaps the text and the box stays short). */
+        .dp-search-wrap .dp-search {
+          width: 100%; height: 38px; box-sizing: border-box;
+          padding: 10px 38px 10px 38px; font-size: 14px; border-radius: 22px;
+          border: 1px solid var(--divider-color, #ccc);
+          background: var(--card-background-color, #fff);
+          color: var(--primary-text-color, #212121);
+        }
+        .dp-search-wrap .dp-search:focus { outline: none; border-color: var(--primary-color, #03a9f4); }
+        .dp-search-icon {
+          position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+          font-size: 15px; color: var(--secondary-text-color, #9e9e9e); pointer-events: none;
+        }
+        .dp-search-clear {
+          position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+          border: none; background: none; cursor: pointer; display: none;
+          font-size: 16px; color: var(--secondary-text-color, #9e9e9e);
+          padding: 2px 6px; border-radius: 50%; line-height: 1;
+        }
+        .dp-search-clear:hover { background: var(--secondary-background-color, #eee); }
+        .dp-search-count {
+          margin: -6px 4px 12px; font-size: 12px;
+          color: var(--secondary-text-color, #9e9e9e); display: none;
+        }
 
         /* ── Tables ── */
         table {
@@ -425,18 +479,29 @@ class DynaliteConfigPanel extends HTMLElement {
 
         <!-- Physical tab content -->
         <div id="dp-tab-physical" class="dp-tab-content active">
-          <!-- Sign-on interval setting -->
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;
-                      padding:10px 14px;border-radius:6px;
-                      background:var(--secondary-background-color,#f5f5f5);flex-wrap:wrap;">
-            <span style="font-size:13px;font-weight:500;">Sign-on poll interval:</span>
-            <input type="number" id="dp-signon-interval" min="60" max="86400" step="60"
-                   style="width:90px;font-size:13px;" value="3600">
-            <span style="font-size:12px;color:var(--secondary-text-color);">seconds
-              &nbsp;(min 60 · max 86400 · recommended ≥ 1800)</span>
-            <button class="dp-btn dp-btn-ghost dp-btn-sm" id="dp-signon-interval-save">Save</button>
-            <span id="dp-interval-saved"
-                  style="font-size:12px;color:#2e7d32;display:none;">✓ Saved</span>
+          <!-- Toolbar: sign-on interval · motion poll · search (merged into one row) -->
+          <div class="dp-phys-toolbar">
+            <div class="dp-tool-item"
+                 title="Seconds between automatic sign-on polls (min 60 · max 86400 · recommended ≥ 1800)">
+              <span class="dp-tool-label">Sign-on&nbsp;(s):</span>
+              <input type="number" id="dp-signon-interval" min="60" max="86400" step="60"
+                     style="width:80px;font-size:13px;padding:8px 8px;" value="3600">
+              <button class="dp-btn dp-btn-ghost dp-btn-sm" id="dp-signon-interval-save">Save</button>
+              <span id="dp-interval-saved" style="font-size:12px;color:#2e7d32;display:none;">✓</span>
+            </div>
+            <div class="dp-tool-item" style="flex:1 1 200px;">
+              <span class="dp-tool-label">🚶 Motion:</span>
+              <input type="text" id="dp-motion-poll-boxes"
+                     placeholder="Boxes e.g. 20, 21 (blank = all D5)"
+                     style="flex:1;min-width:120px;font-size:13px;padding:8px 10px;">
+              <button class="dp-btn dp-btn-ghost dp-btn-sm" id="dp-motion-poll-btn">Poll</button>
+            </div>
+            <div class="dp-search-wrap dp-tool-search">
+              <span class="dp-search-icon">🔍</span>
+              <input type="text" id="dp-search-physical" class="dp-search"
+                     placeholder="Search devices…">
+              <button class="dp-search-clear" id="dp-search-physical-clear" title="Clear">✕</button>
+            </div>
           </div>
           <!-- Add device form (hidden by default) -->
           <div id="dp-add-device-form" style="display:none; margin-bottom:16px;">
@@ -489,16 +554,7 @@ class DynaliteConfigPanel extends HTMLElement {
               </div>
             </div>
           </div>
-          <!-- D5 Sensor Motion Status Poll -->
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;
-                      padding:10px 14px;border-radius:6px;flex-wrap:wrap;
-                      background:var(--secondary-background-color,#f5f5f5);">
-            <span style="font-size:13px;font-weight:500;">🚶 Poll Motion Status:</span>
-            <input type="text" id="dp-motion-poll-boxes"
-                   placeholder="Box numbers e.g. 20, 21, 22  (blank = all D5 Sensors)"
-                   style="flex:1;min-width:220px;font-size:13px;">
-            <button class="dp-btn dp-btn-ghost dp-btn-sm" id="dp-motion-poll-btn">Poll</button>
-          </div>
+          <div class="dp-search-count" id="dp-search-physical-count"></div>
           <div id="dp-device-grid" class="dp-device-grid"></div>
         </div>
 
@@ -530,6 +586,13 @@ class DynaliteConfigPanel extends HTMLElement {
               </div>
             </div>
           </div>
+          <div class="dp-search-wrap">
+            <span class="dp-search-icon">🔍</span>
+            <input type="text" id="dp-search-logical" class="dp-search"
+                   placeholder="Search areas by number, name, or channel name…">
+            <button class="dp-search-clear" id="dp-search-logical-clear" title="Clear">✕</button>
+          </div>
+          <div class="dp-search-count" id="dp-search-logical-count"></div>
           <table>
             <thead>
               <tr>
@@ -553,6 +616,81 @@ class DynaliteConfigPanel extends HTMLElement {
         </div>
 
       </div>`; /* end #dp-panel-body */
+  }
+
+  // ── Search / filter ────────────────────────────────────────────────────────
+
+  _bindSearchEvents() {
+    const wire = (tab, inputId, clearId) => {
+      const input = this.querySelector(inputId);
+      const clear = this.querySelector(clearId);
+      if (!input) return;
+      const run = () => {
+        this._search[tab] = input.value.trim().toLowerCase();
+        clear.style.display = input.value ? "block" : "none";
+        if (tab === "physical") this._applyDeviceSearch();
+        else                    this._applyAreaSearch();
+      };
+      input.addEventListener("input", run);
+      clear.addEventListener("click", () => {
+        input.value = "";
+        run();
+        input.focus();
+      });
+    };
+    wire("physical", "#dp-search-physical", "#dp-search-physical-clear");
+    wire("logical",  "#dp-search-logical",  "#dp-search-logical-clear");
+  }
+
+  // Filter the physical device cards by the current query. Section headers
+  // (Offline/Online) are hidden when none of their cards match. Called after
+  // every _renderDevices() so the filter survives the 5 s auto-refresh.
+  _applyDeviceSearch() {
+    const grid = this.querySelector("#dp-device-grid");
+    if (!grid) return;
+    const q = this._search.physical;
+    let shown = 0, total = 0;
+    let hdr = null, hdrVisible = false;
+    for (const el of grid.children) {
+      if (el.classList.contains("dp-section-hdr")) {
+        if (hdr) hdr.style.display = hdrVisible ? "" : "none";
+        hdr = el; hdrVisible = false;
+        continue;
+      }
+      if (!el.classList.contains("dp-device-card")) continue;  // e.g. empty-state
+      total++;
+      const match = !q || (el.dataset.search || "").includes(q);
+      el.style.display = match ? "" : "none";
+      if (match) { shown++; hdrVisible = true; }
+    }
+    if (hdr) hdr.style.display = hdrVisible ? "" : "none";
+    this._updateSearchCount("physical", q, shown, total);
+  }
+
+  // Filter the logical area rows by the current query.
+  _applyAreaSearch() {
+    const tbody = this.querySelector("#dp-tbody");
+    if (!tbody) return;
+    const q = this._search.logical;
+    let shown = 0, total = 0;
+    for (const tr of tbody.children) {
+      total++;
+      const match = !q || (tr.dataset.search || "").includes(q);
+      tr.style.display = match ? "" : "none";
+      if (match) shown++;
+    }
+    this._updateSearchCount("logical", q, shown, total);
+  }
+
+  _updateSearchCount(tab, q, shown, total) {
+    const el = this.querySelector(`#dp-search-${tab}-count`);
+    if (!el) return;
+    if (!q) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    const noun = tab === "physical" ? "device" : "area";
+    el.textContent = shown === 0
+      ? `No matching ${noun}s for “${q}”.`
+      : `Showing ${shown} of ${total} ${noun}${total === 1 ? "" : "s"}.`;
   }
 
   // ── Tab switching ──────────────────────────────────────────────────────────
@@ -756,6 +894,7 @@ class DynaliteConfigPanel extends HTMLElement {
     const addSection = (label, color, devices) => {
       if (devices.length === 0) return;
       const hdr = document.createElement("div");
+      hdr.className = "dp-section-hdr";
       hdr.style.cssText = "grid-column:1/-1;display:flex;align-items:center;gap:10px;" +
         "margin-bottom:4px;margin-top:8px;";
       hdr.innerHTML = `
@@ -772,6 +911,8 @@ class DynaliteConfigPanel extends HTMLElement {
 
     addSection("Offline", "#e53935", offline);
     addSection("Online",  "#43a047", online);
+
+    this._applyDeviceSearch();
   }
 
   _deviceCard(dev) {
@@ -788,6 +929,11 @@ class DynaliteConfigPanel extends HTMLElement {
     card.style.position = "relative";
     card.dataset.deviceCode = dev.device_code;
     card.dataset.boxNumber  = dev.box_number;
+    const hexCode = "0x" + dev.device_code.toString(16).toUpperCase().padStart(2, "0");
+    card.dataset.search = [
+      displayName, dev.model, "box " + dev.box_number, dev.box_number,
+      hexCode, dev.device_code,
+    ].join(" ").toLowerCase();
     card.innerHTML = `
       <button class="dp-btn dp-btn-danger dp-btn-sm dp-dev-del" title="Delete this device"
               style="position:absolute;top:14px;right:16px;">✕</button>
@@ -969,11 +1115,16 @@ class DynaliteConfigPanel extends HTMLElement {
     tbody.innerHTML = "";
     const sorted = [...this._areas].sort((a, b) => a.area - b.area);
     for (const ar of sorted) tbody.appendChild(this._areaRow(ar));
+    this._applyAreaSearch();
   }
 
   _areaRow(ar) {
     const tr = document.createElement("tr");
     const areaType = ar.area_type || "light";
+    const chNames = (ar.channels || []).map(c => c.name || "").join(" ");
+    tr.dataset.search = [
+      "area " + ar.area, ar.area, ar.name || "", chNames,
+    ].join(" ").toLowerCase();
 
     const areaTypeOpts = Object.entries(AREA_TYPE_LABELS)
       .map(([v, l]) => `<option value="${v}"${v === areaType ? " selected" : ""}>${l}</option>`)

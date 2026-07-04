@@ -1,11 +1,12 @@
 {
   "domain": "dynalite_pdeg",
   "name": "Philips Dynalite (PDEG)",
-  "version": "0.1.1",
-  "codeowners": [],
+  "codeowners": ["@Hollako"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "",
+  "documentation": "https://github.com/Hollako/Dynalite-HA-Integration",
   "iot_class": "local_push",
-  "requirements": []
+  "issue_tracker": "https://github.com/Hollako/Dynalite-HA-Integration/issues",
+  "requirements": [],
+  "version": "1.7.0"
 }

@@ -126,7 +126,7 @@ class DynaliteLuxSensor(SensorEntity):
             name         = dev_name,
             manufacturer = "Philips Dynalite",
             model        = model,
-            via_device   = (DOMAIN, "gateway"),
+            via_device   = (DOMAIN, f"{coordinator.host}_gateway"),
         )
 
     @property
@@ -142,14 +142,14 @@ class DynaliteLuxSensor(SensorEntity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_lux(self._device_code, self._box_number),
+                signal_lux(self._coordinator.host, self._device_code, self._box_number),
                 self._on_lux_update,
             )
         )
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                signal_connection(),
+                signal_connection(self._coordinator.host),
                 self._on_connection,
             )
         )

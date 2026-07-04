@@ -102,7 +102,7 @@ def _remove_all_area_entities(
 
     # ── Area device itself ────────────────────────────────────────────────────
     dev_reg   = dr.async_get(hass)
-    ha_device = dev_reg.async_get_device(identifiers={(DOMAIN, f"area_{area}")})
+    ha_device = dev_reg.async_get_device(identifiers={(DOMAIN, f"{host}_area_{area}")})
     if ha_device:
         dev_reg.async_remove_device(ha_device.id)
         LOGGER.info("[WS] removed area device for area %d", area)
@@ -349,7 +349,7 @@ async def ws_update_area(
     # without requiring a restart or reload.
     from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
     from .const import signal_area  # noqa: PLC0415
-    async_dispatcher_send(hass, signal_area(area_num), ar)
+    async_dispatcher_send(hass, signal_area(coord.host, area_num), ar)
 
     connection.send_result(msg["id"], {"ok": True})
 
@@ -551,7 +551,7 @@ async def ws_update_channel(
         # Name-only change: push a signal so the existing entity refreshes immediately
         from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
         from .const import signal_channel  # noqa: PLC0415
-        async_dispatcher_send(hass, signal_channel(msg["area"], msg["ch0"]), ch)
+        async_dispatcher_send(hass, signal_channel(coord.host, msg["area"], msg["ch0"]), ch)
 
     connection.send_result(msg["id"], {"ok": True, "reloading": False})
 
@@ -591,7 +591,7 @@ async def ws_delete_channel(
                 ent_reg.async_remove(entry.entity_id)
                 LOGGER.info("[WS] removed entity %s (uid=%s)", entry.entity_id, entry.unique_id)
         # 2. Also signal live entity objects so they tear themselves down cleanly
-        async_dispatcher_send(hass, signal_channel_remove(area_num, ch0))
+        async_dispatcher_send(hass, signal_channel_remove(coord.host, area_num, ch0))
         # 3. Evict from each platform's known set so it won't be re-created
         for cb in coord.on_channel_type_change_cbs:
             cb(area_num, ch0)
@@ -848,7 +848,7 @@ async def ws_update_device(
     from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
     from .const import signal_device  # noqa: PLC0415
     async_dispatcher_send(
-        hass, signal_device(msg["device_code"], msg["box_number"]), coord.device_online.get((msg["device_code"], msg["box_number"]), False)
+        hass, signal_device(coord.host, msg["device_code"], msg["box_number"]), coord.device_online.get((msg["device_code"], msg["box_number"]), False)
     )
 
     LOGGER.info("[WS] renamed device box %d → '%s'", msg["box_number"], msg["name"])
@@ -1422,7 +1422,7 @@ async def ws_update_preset_names(
     # Push signal_area so preset-selector entity labels update immediately
     from homeassistant.helpers.dispatcher import async_dispatcher_send  # noqa: PLC0415
     from .const import signal_area  # noqa: PLC0415
-    async_dispatcher_send(hass, signal_area(area_num), ar)
+    async_dispatcher_send(hass, signal_area(coord.host, area_num), ar)
 
     LOGGER.info("[WS] preset names updated for area %d: %s", area_num, new_names)
     connection.send_result(msg["id"], {"ok": True, "preset_names": {str(k): v for k, v in new_names.items()}})
