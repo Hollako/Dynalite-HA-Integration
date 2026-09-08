@@ -63,7 +63,8 @@ def parse_logical_xml(content: str) -> list[dict]:
 
     areas: list[dict] = []
 
-    for area_el in root.findall("Area"):
+    # System Builder can group areas inside arbitrarily nested folders.
+    for area_el in root.iter("Area"):
         try:
             area_id = int(area_el.get("id", "0"))
         except ValueError:
